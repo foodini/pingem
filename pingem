@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+
+# If you're reading this, know that I am not, have never been, nor shall ever
+# be a frontend engineer. Being color blind means not giving two fucks about UI
+# because, for the most part, no-one in UI gives two fucks about CD users, and
+# it breeds a frustration with the entire topic. If you have a problem with the
+# way it looks, feel free to express your ideas in the form of a pull request.
+
+#TODO:
+# * Get off of port 8000 and use a dynamically-selected port. (Start the server
+#   w/o an explicit port and just advertize whatever port the server is given.)
+# * Maybe an actual favicon.ico? Just pack it as a string?
+
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import secrets
+from threading import Thread
+from time import sleep
+from urllib.parse import urlparse, parse_qs
+import webbrowser
+
+
+index = '''
+<html><head><title>pingem v1.0e-20</title></head><body>
+<canvas id=graph0 width=500 height=300></canvas>
+<script type='text/javascript'>
+  class Graph{
+    constructor(pane, endpoint) {
+      this.pane = pane;
+      this.endpoint = endpoint;
+      this.canvas = document.getElementById(pane);
+      this.context = this.canvas.getContext('2d');
+
+      const stream_url = 'http://localhost:8000/?host='+endpoint+'&secret='+SECRET;
+      console.log(stream_url);
+      const event_source = new EventSource(stream_url);
+      this.context.strokeStyle='blue';
+      this.context.lineWidth=1;
+      this.context.beginPath();
+      this.context.moveTo(0,150);
+'''
+In the middle of this bit: need to accept event_source messages, extract their data,
+and use it to draw the graph
+'''
+      for(let x=5; x<500; x+=5) {
+        this.context.lineTo(x,(150+x*x)%300);
+      }
+      this.context.stroke();
+    }
+  }
+
+  graph = new Graph('graph0', 'amazon');
+</script>
+</body>
+'''
+
+secret = secrets.randbelow(1000000000000000)
+
+def start_browser():
+  # give the server a moment to start up. I've never seen this to be necessary,
+  # but you never know.
+  sleep(1.0)
+  webbrowser.open(f'http://127.0.0.1:8000?secret={secret}', new=0)
+
+class PingHandler(BaseHTTPRequestHandler):
+  def authorizeish(self):
+    # Eventually, I'll want to hide the secret in headers..
+    self.parsed_url = urlparse(self.path)
+    self.query_params = parse_qs(self.parsed_url.query)
+    if ('secret' not in self.query_params or
+        type(self.query_params['secret']) != list or
+        int(self.query_params['secret'][0]) != secret):
+      return False
+    return True
+
+  def serve_index(self):
+    self.send_response(200)
+    self.send_header('Content-type', 'text/html')
+    self.end_headers()
+
+    # Better (django-like?) interpolation?
+    hydrated_index = index.replace('SECRET', str(secret))
+    self.wfile.write(bytes(hydrated_index, 'utf8'))
+
+  def serve_stream(self):
+    self.send_response(200)
+    self.send_header('Content-type', 'text/html')
+    self.end_headers()
+
+    while(True):
+      self.wfile.write(bytes(f'{random.randint(300)}\n'))
+      self.wfile.flush()
+      sleep(1)
+
+  def do_GET(self):
+    if('favicon.ico' in self.path):
+      #Can I reject the request silently, w/o response?
+      return
+
+    if(not self.authorizeish()):
+      raise PermissionError('Auth failure. TODO: more info in this message.')
+
+    if(self.parsed_url.path == '/'):
+      self.serve_index()
+    else:
+      self.serve_stream()
+
+def run(server_class=ThreadingHTTPServer, handler_class=PingHandler):
+  server_address = ('', 8000) # serve on all interfaces, port 8000
+  httpd = server_class(server_address, handler_class)
+  t = Thread(target=start_browser, args=[])
+  t.run()
+  print('starting httpd...')
+  httpd.serve_forever()
+
+run()
+print('after run')
