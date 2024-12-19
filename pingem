@@ -10,50 +10,204 @@
 # * Get off of port 8000 and use a dynamically-selected port. (Start the server
 #   w/o an explicit port and just advertize whatever port the server is given.)
 # * Maybe an actual favicon.ico? Just pack it as a string?
+# * Allow user to alter packet size. (-s argument) Maybe have multiple sizes in
+#   same line? I'm not sure how that graph would look.
 
+import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import re
 import secrets
+import select
+import shutil
+from subprocess import Popen, PIPE
 from threading import Thread
 from time import sleep
 from urllib.parse import urlparse, parse_qs
 import webbrowser
 
+parser = argparse.ArgumentParser(
+  description='pingem [-i interval] endpoint [endpoint [endpoint...]]')
+parser.add_argument('-i', '--interval', help='time (as a float) between pings')
+parser.add_argument('endpoints', nargs='*',
+                    help='IP name or address of target[s]',
+                    default=['8.8.8.8'])
+cl_args = parser.parse_args()
+print(cl_args.endpoints)
+print(cl_args)
+
+#TODO: Do something sane if ping isn't found anywhere
+ping = shutil.which('ping')
+print('using ping binary at:' + ping)
+
+#TODO: I'd like to be able to accomplish this by using cloneNode, but if I clone
+#      an entire row of a table, the ids of the individual cells aren't unique
+#      and are therefore a pain in the ass to locate. This way, I can get them
+#      with getElementById. There's probably a better way.
+#TODO: Replace the X with an "icon" (a couple lines on canvas.)
+row_def = '''
+<tr id=row{y}>
+<td id=longspan{y} border=0>longspan{y}</td>
+<td id=shortspan{y}>shortspan{y}</td>
+<td width=1% valign=top>
+  <button id=halt{y} onclick='halt({y});'>X</button>
+</td>
+<td id=detail{y} rowspan=2>detail{y}</td>
+</tr>
+<tr id=raw_ping_row{y} height=40px>
+<td colspan=3 id=raw_ping{y} class='terminal'>raw_ping{y}</td>
+</tr>
+'''
 
 index = '''
-<html><head><title>pingem v1.0e-20</title></head><body>
-<canvas id=graph0 width=500 height=300></canvas>
-<script type='text/javascript'>
-  class Graph{
-    constructor(pane, endpoint) {
-      this.pane = pane;
-      this.endpoint = endpoint;
-      this.canvas = document.getElementById(pane);
-      this.context = this.canvas.getContext('2d');
-
-      const stream_url = 'http://localhost:8000/?host='+endpoint+'&secret='+SECRET;
-      console.log(stream_url);
-      const event_source = new EventSource(stream_url);
-      this.context.strokeStyle='blue';
-      this.context.lineWidth=1;
-      this.context.beginPath();
-      this.context.moveTo(0,150);
-'''
-In the middle of this bit: need to accept event_source messages, extract their data,
-and use it to draw the graph
-'''
-      for(let x=5; x<500; x+=5) {
-        this.context.lineTo(x,(150+x*x)%300);
-      }
-      this.context.stroke();
-    }
+<html>
+<head>
+<title>pingem v1.0e-20</title>
+<style>
+  #overlayCanvas{
+    position:fixed;top:0;left:0;bottom:0;right:0;z-index:10;pointerevents:'none';}
+  body{background-color:black;color:white;overflow:hidden;}
+  tr{border-right:0px;border-left:0px;border-top:0px;}
+  .terminal{font-family:monospace;}
+</style>
+</head>
+<body>
+<canvas id='overlayCanvas'></canvas>
+<table id='layout' width=100% height=100% border=1 cellspacing=0 cellpadding=0>
+<tr height=0%>
+  <td colspan=3>
+    <input id=endpoint value='add endpoint'>
+    <button onclick='add_endpoint();'>Add!</button>
+  </td>
+</tr>
+ROWS
+</table>
+<script type='text/javascript' defer>
+class RowManager {
+  constructor() {
+    self.endpoints = {}
   }
 
-  graph = new Graph('graph0', 'amazon');
+  activate_row(index) {
+    console.log('activating row ' + index);
+    document.getElementById('row'+index).style.display = undefined;
+    document.getElementById('raw_ping_row'+index).style.display = undefined;
+  }
+
+  deactivate_row(index) {
+    console.log('deactivating row ' + index);
+    document.getElementById('row'+index).style.display = 'none';
+    document.getElementById('raw_ping_row'+index).style.display = 'none';
+  }
+
+  handle_endpoints_list(data) {
+    console.log('endpoint_list', data)
+    for(let index=0; index<5; index++) {
+      if(data.endpoints[index]) {
+        this.activate_row(index);
+      } else {
+        this.deactivate_row(index);
+      }
+    }
+
+    this.on_resize();
+  }
+
+  on_resize() {
+    // Each graph needs updates on its geometry and needs a redraw.
+  }
+
+  handle_message(data) {
+    if(data.msg_type == 'endpoints') {
+      this.handle_endpoints_list(data);
+    } else {
+      console.log('incoming pong:')
+      document.getElementById('raw_ping'+data.index).textContent=data['raw'];
+    }
+  }
+}
+
+class OverlayManager {
+  constructor() {
+    this.canvas = document.getElementById('overlayCanvas');
+    this.context = this.canvas.getContext('2d');
+    console.log('OverlayManager.canvas:', this.canvas);
+    this.canvas.width = window.innerWidth;
+    this.canvas.height = window.innerHeight;
+    this.cursor_width = 75;
+
+    this.last_cursor_x = 0;
+    this.last_cursor_width = this.cursor_width;
+
+    this.canvas.addEventListener('wheel', (event) => {
+      event.preventDefault();
+      this.cursor_width -= event.deltaY/120;
+      if(this.cursor_width < 1) {
+        this.cursor_width = 1;
+      }
+      this.draw_cursor(this.last_cursor_x);
+    });
+
+    this.canvas.addEventListener('mousemove', (event) => {
+      this.draw_cursor(event.clientX);
+    });
+  }
+
+  draw_cursor(x) {
+    //TODO: this blacks out an area twice the necessary size. Fix it.
+    this.context.clearRect(
+      this.last_cursor_x - this.last_cursor_width, 0,
+      this.last_cursor_width*2, this.canvas.height);
+
+    this.context.beginPath();
+    this.context.lineWidth = this.cursor_width
+    this.context.strokeStyle = '#0000ff80';
+    this.context.moveTo(x, 0);
+    this.context.lineTo(x, this.canvas.height-1);
+    this.context.stroke();
+
+    this.context.beginPath();
+    this.context.lineWidth = 3;
+    this.context.strokeStyle = 'red';
+    this.context.moveTo(x, 0);
+    this.context.lineTo(x, this.canvas.height-1);
+    this.context.stroke();
+
+    this.last_cursor_x = x;
+    this.last_cursor_width = this.cursor_width;
+  }
+}
+
+class DataRelay {
+  constructor() {
+    console.log('constructor called');
+    const stream_url = '/stream/?secret='+SECRET;
+    this.name = 'foo';
+    this.event_source = new EventSource(stream_url);
+    this.event_source.onmessage = (event) => {
+      const json_data=event.data;
+      const data = JSON.parse(json_data);
+      rowManager.handle_message(data);
+    };
+    this.event_source.onerror = (error) => {
+      console.error('event_source.onerror:', error);
+    };
+    console.log('handler is supposedly set up');
+  }
+}
+
+let dataRelay = new DataRelay();
+let rowManager = new RowManager();
+let overlayManager = new OverlayManager();
+
 </script>
 </body>
 '''
 
 secret = secrets.randbelow(1000000000000000)
+#TODO: temporarily overridden for debugging
+secret = 1
+print('using secret', secret);
 
 def start_browser():
   # give the server a moment to start up. I've never seen this to be necessary,
@@ -61,35 +215,128 @@ def start_browser():
   sleep(1.0)
   webbrowser.open(f'http://127.0.0.1:8000?secret={secret}', new=0)
 
-class PingHandler(BaseHTTPRequestHandler):
+def encode_as_wire_message(data):
+  json_encoded = json.dumps(data)
+  return bytes('data: ' + json_encoded + '\n\n', 'utf8')
+
+class PingManager():
+  def __init__(self, endpoint_names):
+    self.successful_response_regex = re.compile(
+      r'from ([^:]*):.*seq=(\d*) ttl=(\d*) time=([0-9.]*) ms')
+
+    # We use a dict here because we want to be able to delete an entry without
+    # the ide of later entries changing:
+    self.endpoints = {};
+    for endpoint_name in endpoint_names:
+      self.add_endpoint(endpoint_name)
+
+  def add_endpoint(self, endpoint_name):
+    #TODO: at startup, work out the location of ping binary
+    endpoint_key = None
+    for index in range(5):
+      if index not in self.endpoints:
+        endpoint_key = index
+        break
+
+    if endpoint_key is None:
+      raise "Too many endpoints requested"
+
+    print('ENDPOINT BEING ADDED: ' + endpoint_name)
+    interval = '1.0'
+    if cl_args.interval:
+      interval = str(cl_args.interval)
+    self.endpoints[endpoint_key] = {'endpoint_name': endpoint_name}
+    self.endpoints[endpoint_key]['subprocess'] = (
+      Popen([ping, '-i', interval, endpoint_name], stderr=PIPE, stdout=PIPE))
+
+  def get_events(self):
+    events = []
+    for endpoint_index, endpoint_data in self.endpoints.items():
+      stdouts = [endpoint_data['subprocess'].stdout]
+
+      readable_stdouts, _, _ = select.select(stdouts, [], [])
+      for stdout in readable_stdouts:
+        print(endpoint_index, end='', flush=True)
+        line = stdout.readline().decode().strip()
+        match = re.search(self.successful_response_regex, line)
+        if match:
+          data = {}
+          data['msg_type'] = 'pong'
+          data['responder'] = match.group(1)
+          data['icmp_seq'] = int(match.group(2))
+          data['ttl'] = int(match.group(3))
+          data['time'] = float(match.group(4))
+          data['raw'] = line
+          data['index'] = endpoint_index
+          events.append(encode_as_wire_message(data))
+
+    return events
+
+  def get_endpoint_names(self):
+    for k,v in self.endpoints.items():
+      print(k,v)
+    return {k:v['endpoint_name'] for k,v in self.endpoints.items()}
+
+#TODO: Get this constant in the class
+class RequestHandler(BaseHTTPRequestHandler):
   def authorizeish(self):
     # Eventually, I'll want to hide the secret in headers..
     self.parsed_url = urlparse(self.path)
     self.query_params = parse_qs(self.parsed_url.query)
+
+    #TODO: get rid of early exit:
+    return True
+
     if ('secret' not in self.query_params or
         type(self.query_params['secret']) != list or
         int(self.query_params['secret'][0]) != secret):
       return False
     return True
 
+  def add_misc_headers(self, content_type):
+    self.send_header('Content-type', content_type)
+    self.send_header('Cache-Control', 'no-cache')
+    self.send_header('Connection', 'keep-alive')
+    self.send_header('Access-Control-Allow-Credentials', 'true')
+    self.send_header('Access-Control-Allow-Origin', '*')
+
   def serve_index(self):
     self.send_response(200)
-    self.send_header('Content-type', 'text/html')
+    self.add_misc_headers('text/html')
     self.end_headers()
 
-    # Better (django-like?) interpolation?
+    # TODO: Better (django-like?) interpolation? 
+    # TODO: I can't use .format w/ index because it freaks out every time it
+    # sees a {, which javascript and css kick in all the time. I don't want to
+    # have to use \{ every time.....
+    rows = ''
+    for row_id in range(5):
+      rows += row_def.format(y=row_id)
     hydrated_index = index.replace('SECRET', str(secret))
+    hydrated_index = hydrated_index.replace('ROWS', rows)
     self.wfile.write(bytes(hydrated_index, 'utf8'))
+
+  def send_endpoint_update(self):
+    data = {}
+    data['msg_type'] = 'endpoints'
+    data['endpoints'] = ping_manager.get_endpoint_names()
+    self.wfile.write(encode_as_wire_message(data))
 
   def serve_stream(self):
     self.send_response(200)
-    self.send_header('Content-type', 'text/html')
+    self.add_misc_headers('text/event-stream')
     self.end_headers()
 
+    print('Beginning to serve stream...')
+    #TODO: There is a problem here. If serve_stream has two callers, each caller
+    #      only gets half the data. 
+
+    self.send_endpoint_update();
+
     while(True):
-      self.wfile.write(bytes(f'{random.randint(300)}\n'))
-      self.wfile.flush()
-      sleep(1)
+      for event in ping_manager.get_events():
+        self.wfile.write(event)
+        self.wfile.flush()
 
   def do_GET(self):
     if('favicon.ico' in self.path):
@@ -97,6 +344,8 @@ class PingHandler(BaseHTTPRequestHandler):
       return
 
     if(not self.authorizeish()):
+      #TODO: More info. Maybe even dump to a log?
+      print('failed to authorize:' + self.path)
       raise PermissionError('Auth failure. TODO: more info in this message.')
 
     if(self.parsed_url.path == '/'):
@@ -104,13 +353,16 @@ class PingHandler(BaseHTTPRequestHandler):
     else:
       self.serve_stream()
 
-def run(server_class=ThreadingHTTPServer, handler_class=PingHandler):
+def run(server_class=ThreadingHTTPServer, handler_class=RequestHandler):
+  #TODO: allow the port number to be dynamically assigned.
   server_address = ('', 8000) # serve on all interfaces, port 8000
   httpd = server_class(server_address, handler_class)
-  t = Thread(target=start_browser, args=[])
+  t = Thread(target=start_browser)
   t.run()
   print('starting httpd...')
   httpd.serve_forever()
+
+ping_manager = PingManager(cl_args.endpoints);
 
 run()
 print('after run')

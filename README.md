@@ -9,6 +9,15 @@ started to those endpoints. Statistics on rtt, like avg and a bunch of
 percentiles, as well as info about loss will be displayed and updated in real
 time.
 
-Further, I'm going to keep some track of how much time I spend on this. Not for
-any better reason that I want to try to work on it in 1-hour blocks to avoid the
-kind of insomnia binges that tend to come with such projects.
+One of the things that I'm discovering is that my personal habits for
+identifiers clash with those of javascript. In general, there's no strong
+technical argument to be made for choosing CamelCasing vs dromedaryCasing vs
+my_preferred_style, but on can argue that javascript adds a potential objective
+argument: bandwidth. This project is uncacheable and the javascript is fully
+"downloaded" every time. The extra underscores are bytes squandered, but I don't
+give a crap. This is not intended to work across the network. It's all
+localhost.
+
+I tried, briefly, sticking to JS style in JS and python style in python, but I
+found my on-the-wire identifiers clashing so I said fuckit. Anything you see
+that isn't underscored is v0.0.0.01 stuff that has lingered.
