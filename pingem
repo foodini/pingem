@@ -16,13 +16,14 @@
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 import re
 import secrets
 import select
 import shutil
 from subprocess import Popen, PIPE
 from threading import Thread
-from time import sleep
+import time
 from urllib.parse import urlparse, parse_qs
 import webbrowser
 
@@ -127,10 +128,104 @@ class RowManager {
   }
 }
 
+class Span {
+  constructor() {
+    this.rtts = [];
+    this.lost = 0;
+    this.total_rtt_time = 0.0;
+    this.dirty = true;
+  }
+
+  push(event) {
+    this.events[event.icmp_seq] = event;
+    this.dirty = true;
+    this.total += 1;
+    if(event['event_type'] == 'pong') {
+      this.total_rtt_time += event['rtt']);
+    } else {
+      this.lost += 1;
+    }
+  }
+
+  get_stats() {
+    if(this.dirty) {
+      this.stats = new Object();
+      this.rtts.sort(function(a,b) { return a-b;}); // REALLY, Javascript? Fuck you.
+      stats.rtts = this.rtts;
+    }
+  }
+}
+
+class EventBuffer {
+  constructor(span_width) {
+    this.events = {};
+    this.spans = {};
+    this.span_width = span_width;
+    this.last_span_width = -1;
+    //TODO: keep a list of dirty spans so you don't have to iterate over the whole thing every time.
+  }
+
+  get_span_id(timpstamp) {
+    Math.floor(timestamp, this.span_width);
+  }
+
+  append(event) {
+    icmp_seq = event['icmp_seq'];
+    if(event['msg_type'] == 'expected') {
+      this.events[icmp_seq] |= event;
+    } else {
+      this.events[icmp_seq] = event;
+    }
+    this.event[icmp_seq]['raw'] = undefined;
+
+    span_id = get_span_id(event['timestamp']);
+    this.spans[span_id] |= new Span();
+    this.spans[span_id].push(event);
+
+    //On the chance that a packet arrived in the current frame after it had been timed out in the
+    //previous frame:
+    if(this.spans[span_id-1]) {
+      this.spans[span_id-1].dirty = true;
+    }
+  }
+
+  rebuild_spans() {
+    this.spans = {}
+
+    span_start_time = 0.0;
+    span_end_time = this.span_width;
+    for(const event of this.events) {
+      span_id = get_span_id(event['timestamp']);
+      this.spans[span_id] |= new Span();
+      this.spans[span_id].push(event);
+    }
+  }
+
+  change_span_width(span_width) {
+    this.span_width = span_width;
+    rebuild_spans();
+  }
+
+}
+
+class Graph {
+  constructor(canvas_name, event_buffer) {
+    this.canvas = document.getElementById(canvas_name);
+    this.context = this.canvas.getContext('2d');
+    this.event_buffer = event_buffer;
+    this.last_width = 0;
+    this.last_height = 0;
+  }
+
+  redraw() {
+  }
+}
+
 class OverlayManager {
   constructor() {
     this.canvas = document.getElementById('overlayCanvas');
     this.context = this.canvas.getContext('2d');
+
     console.log('OverlayManager.canvas:', this.canvas);
     this.canvas.width = window.innerWidth;
     this.canvas.height = window.innerHeight;
@@ -154,10 +249,9 @@ class OverlayManager {
   }
 
   draw_cursor(x) {
-    //TODO: this blacks out an area twice the necessary size. Fix it.
     this.context.clearRect(
-      this.last_cursor_x - this.last_cursor_width, 0,
-      this.last_cursor_width*2, this.canvas.height);
+      this.last_cursor_x - this.last_cursor_width/2 - 1, 0,
+      this.last_cursor_width + 2, this.canvas.height);
 
     this.context.beginPath();
     this.context.lineWidth = this.cursor_width
@@ -167,7 +261,7 @@ class OverlayManager {
     this.context.stroke();
 
     this.context.beginPath();
-    this.context.lineWidth = 3;
+    this.context.lineWidth = 1;
     this.context.strokeStyle = 'red';
     this.context.moveTo(x, 0);
     this.context.lineTo(x, this.canvas.height-1);
@@ -212,7 +306,7 @@ print('using secret', secret);
 def start_browser():
   # give the server a moment to start up. I've never seen this to be necessary,
   # but you never know.
-  sleep(1.0)
+  time.sleep(1.0)
   webbrowser.open(f'http://127.0.0.1:8000?secret={secret}', new=0)
 
 def encode_as_wire_message(data):
@@ -224,34 +318,83 @@ class PingManager():
     self.successful_response_regex = re.compile(
       r'from ([^:]*):.*seq=(\d*) ttl=(\d*) time=([0-9.]*) ms')
 
+    self.interval = 1.0
+    if cl_args.interval:
+      self.interval = cl_args.interval
+
     # We use a dict here because we want to be able to delete an entry without
     # the ide of later entries changing:
     self.endpoints = {};
     for endpoint_name in endpoint_names:
       self.add_endpoint(endpoint_name)
 
+
   def add_endpoint(self, endpoint_name):
     #TODO: at startup, work out the location of ping binary
-    endpoint_key = None
+    endpoint_index = None
     for index in range(5):
       if index not in self.endpoints:
-        endpoint_key = index
+        endpoint_index = index
         break
 
-    if endpoint_key is None:
+    if endpoint_index is None:
       raise "Too many endpoints requested"
 
     print('ENDPOINT BEING ADDED: ' + endpoint_name)
-    interval = '1.0'
-    if cl_args.interval:
-      interval = str(cl_args.interval)
-    self.endpoints[endpoint_key] = {'endpoint_name': endpoint_name}
-    self.endpoints[endpoint_key]['subprocess'] = (
-      Popen([ping, '-i', interval, endpoint_name], stderr=PIPE, stdout=PIPE))
+    self.endpoints[endpoint_index] = {'endpoint_name': endpoint_name}
+    self.endpoints[endpoint_index]['subprocess'] = (
+      Popen([ping, '-i', str(self.interval), endpoint_name], stderr=PIPE, stdout=PIPE))
+    now = time.time()
+    self.endpoints[endpoint_index]['start_time'] = now
+    self.endpoints[endpoint_index]['last_loss_check_time'] = now
+
+  def get_wide_icmp_seq(self, narrow, endpoint_index):
+    now = time.time()
+    elapsed = now - self.endpoints[endpoint_index]['start_time']
+    #Compute how many 65k runs we should expect to have completed:
+    runs = (65536.0 * self.interval)/(elapsed)
+    runs_fract, runs_floor = math.modf(runs)
+    runs_floor = int(runs_floor)
+
+    if runs_fract >= 0.8:
+      if narrow < 32768:
+        return narrow + (65536 * runs_floor + 1)
+    elif runs_fract < 0.2:
+      if narrow > 32768:
+        return narrow + (65536 * runs_floor - 1)
+    else:
+      return narrow + 65536 * runs_floor
+
+  def get_expected_events(self, endpoint_index):
+    events = []
+
+    last_time = self.endpoints[endpoint_index]['last_loss_check_time']
+    now = time.time()
+    time_to_check = now
+    while time_to_check > last_time:
+      elapsed_time = time_to_check - self.endpoints[endpoint_index]['start_time']
+
+      #TODO: Make the timeout time user-configurable.
+      icmp_seq = int((elapsed_time - 3.0)/self.interval)
+      if (icmp_seq >= 0):
+        data = {'msg_type':'expected'}
+        data['icmp_seq'] = icmp_seq
+        data['index'] = endpoint_index
+        data['timestamp'] = time.time() - self.endpoints[endpoint_index]['start_time']
+        print('expected icmp_seq:', data)
+        events.append(encode_as_wire_message(data))
+
+      time_to_check -= self.interval
+
+    self.endpoints[endpoint_index]['last_loss_check_time'] = now
+
+    return events
 
   def get_events(self):
     events = []
     for endpoint_index, endpoint_data in self.endpoints.items():
+      events += self.get_expected_events(endpoint_index)
+
       stdouts = [endpoint_data['subprocess'].stdout]
 
       readable_stdouts, _, _ = select.select(stdouts, [], [])
@@ -263,18 +406,18 @@ class PingManager():
           data = {}
           data['msg_type'] = 'pong'
           data['responder'] = match.group(1)
-          data['icmp_seq'] = int(match.group(2))
+          icmp_seq = self.get_wide_icmp_seq(int(match.group(2)), endpoint_index)
+          data['icmp_seq'] = icmp_seq
           data['ttl'] = int(match.group(3))
-          data['time'] = float(match.group(4))
+          data['rtt'] = float(match.group(4))
           data['raw'] = line
           data['index'] = endpoint_index
+          data['timestamp'] = time.time() - self.endpoints[endpoint_index]['start_time']
           events.append(encode_as_wire_message(data))
 
     return events
 
   def get_endpoint_names(self):
-    for k,v in self.endpoints.items():
-      print(k,v)
     return {k:v['endpoint_name'] for k,v in self.endpoints.items()}
 
 #TODO: Get this constant in the class
@@ -320,6 +463,7 @@ class RequestHandler(BaseHTTPRequestHandler):
     data = {}
     data['msg_type'] = 'endpoints'
     data['endpoints'] = ping_manager.get_endpoint_names()
+    print('Sending endpoint update: ', data)
     self.wfile.write(encode_as_wire_message(data))
 
   def serve_stream(self):
