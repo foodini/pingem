@@ -48,15 +48,24 @@ print('using ping binary at:' + ping)
 #TODO: Replace the X with an "icon" (a couple lines on canvas.)
 row_def = '''
 <tr id=row{y}>
-<td id=longspan_td{y} class=graph_canvas border=0><canvas id=longspan_canvas{y}></canvas></td>
-<td id=shortspan_td{y} class=graph_canvas border=0><canvas id=shortspan_canvas{y}></canvas></td>
-<td valign=top>
-  <button id=halt{y} onclick='halt({y});'>X</button>
-</td>
-<td id=detail{y} rowspan=2>detail{y}</td>
+  <td id=longspan_td{y} class=graph_canvas border=0>
+    <canvas id=longspan_canvas{y}>
+    </canvas>
+  </td>
+  <td id=shortspan_td{y} class=graph_canvas border=0>
+    <canvas id=shortspan_canvas{y}>
+    </canvas>
+  </td>
+  <td valign=top>
+    <button id=halt{y} onclick='halt({y});'>X</button>
+  </td>
+  <td class=detail id=detail{y} rowspan=2>
+    <canvas id=detail{y}>
+    </canvas>
+  </td>
 </tr>
 <tr id=raw_ping_row{y} height=40px>
-<td colspan=3 id=raw_ping{y} class='terminal'>raw_ping{y}</td>
+  <td colspan=3 id=raw_ping{y} class='terminal'>raw_ping{y}</td>
 </tr>
 '''
 
@@ -65,17 +74,17 @@ index = '''
 <head>
 <title>pingem v1.0e-20</title>
 <style>
+  canvas{width:100%;height:100%}
   #overlayCanvas{
     position:fixed;top:0;left:0;bottom:0;right:0;z-index:10;pointerevents:'none';}
   body{background-color:black;color:white;overflow:hidden;}
   tr{border-right:0px;border-left:0px;border-top:0px;}
   .terminal{font-family:monospace;}
-  .graph_canvas{width:100%;height:100%;}
 </style>
 </head>
 <body>
 <canvas id='overlayCanvas'></canvas>
-<table id='layout' width=100% height=100% border=1 cellspacing=0 cellpadding=0>
+<table id='layout' table-layout:fixed width=100% height=100% border=1 cellspacing=0 cellpadding=0>
 <tr height=0%>
   <td colspan=3>
     <input id=endpoint value='add endpoint'>
@@ -120,7 +129,11 @@ class Graph {
     this.spans = {};
     this.graph_age = graph_age;
     this.canvas = canvas;
+    console.log('Graph constructed with canvas:', canvas);
+    this.context = canvas.getContext('2d');
     //TODO: keep a list of dirty spans so you don't have to iterate over the whole thing every time.
+
+    this.redraw();
   }
 
   get_span_id(timestamp) {
@@ -163,6 +176,25 @@ class Graph {
     this.span_width = span_width;
     rebuild_spans();
   }
+
+  redraw() {
+    let canvas = this.canvas;
+    let ctx = this.context;
+    ctx.globalCompositeOperation='lighter';
+    ctx.fillStyle = 'rgba(255,0,0,0.2)';
+
+    let width = canvas.width;
+    let height = canvas.height;
+
+    for(let dpx=5; dpx<35; dpx+=5) {
+      ctx.fillRect(dpx, dpx, width-dpx*2, height-dpx*2);
+    }
+
+    ctx.globalCompositeOperation='source-over';
+    ctx.fillStyle = 'black';
+    ctx.font='20px Courier';
+    ctx.fillText(''+width+'x'+height, 25, 25);
+  }
 }
 
 class EventRouter {
@@ -177,11 +209,11 @@ class EventRouter {
     document.getElementById('raw_ping_row'+index).style.display = undefined;
 
     if(self.event_buffers[index] == undefined) {
-      let longspan_element = document.getElementById('longspan_canvas'+index);
-      let shortspan_element = document.getElementById('shortspan_canvas'+index);
+      let longspan_canvas = document.getElementById('longspan_canvas'+index);
+      let shortspan_canvas = document.getElementById('shortspan_canvas'+index);
       self.event_buffers[index] = [
-          new Graph(60*60, longspan_element),
-          new Graph(60*5), shortspan_element];
+          new Graph(60*60, longspan_canvas),
+          new Graph(60*5, shortspan_canvas)];
     }
   }
 
