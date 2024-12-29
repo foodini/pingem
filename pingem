@@ -48,9 +48,9 @@ print('using ping binary at:' + ping)
 #TODO: Replace the X with an "icon" (a couple lines on canvas.)
 row_def = '''
 <tr id=row{y}>
-<td id=longspan{y} border=0>longspan{y}</td>
-<td id=shortspan{y}>shortspan{y}</td>
-<td width=1% valign=top>
+<td id=longspan_td{y} class=graph_canvas border=0><canvas id=longspan_canvas{y}></canvas></td>
+<td id=shortspan_td{y} class=graph_canvas border=0><canvas id=shortspan_canvas{y}></canvas></td>
+<td valign=top>
   <button id=halt{y} onclick='halt({y});'>X</button>
 </td>
 <td id=detail{y} rowspan=2>detail{y}</td>
@@ -70,6 +70,7 @@ index = '''
   body{background-color:black;color:white;overflow:hidden;}
   tr{border-right:0px;border-left:0px;border-top:0px;}
   .terminal{font-family:monospace;}
+  .graph_canvas{width:100%;height:100%;}
 </style>
 </head>
 <body>
@@ -84,64 +85,21 @@ index = '''
 ROWS
 </table>
 <script type='text/javascript' defer>
-class RowManager {
-  constructor() {
-    self.endpoints = {}
-  }
-
-  activate_row(index) {
-    console.log('activating row ' + index);
-    document.getElementById('row'+index).style.display = undefined;
-    document.getElementById('raw_ping_row'+index).style.display = undefined;
-  }
-
-  deactivate_row(index) {
-    console.log('deactivating row ' + index);
-    document.getElementById('row'+index).style.display = 'none';
-    document.getElementById('raw_ping_row'+index).style.display = 'none';
-  }
-
-  handle_endpoints_list(data) {
-    console.log('endpoint_list', data)
-    for(let index=0; index<5; index++) {
-      if(data.endpoints[index]) {
-        this.activate_row(index);
-      } else {
-        this.deactivate_row(index);
-      }
-    }
-
-    this.on_resize();
-  }
-
-  on_resize() {
-    // Each graph needs updates on its geometry and needs a redraw.
-  }
-
-  handle_message(data) {
-    if(data.msg_type == 'endpoints') {
-      this.handle_endpoints_list(data);
-    } else {
-      console.log('incoming pong:')
-      document.getElementById('raw_ping'+data.index).textContent=data['raw'];
-    }
-  }
-}
-
 class Span {
   constructor() {
     this.rtts = [];
     this.lost = 0;
     this.total_rtt_time = 0.0;
     this.dirty = true;
+    this.events = {};
   }
 
   push(event) {
-    this.events[event.icmp_seq] = event;
+    this.events[event['icmp_seq']] = event;
     this.dirty = true;
     this.total += 1;
     if(event['event_type'] == 'pong') {
-      this.total_rtt_time += event['rtt']);
+      this.total_rtt_time += event['rtt'];
     } else {
       this.lost += 1;
     }
@@ -156,36 +114,36 @@ class Span {
   }
 }
 
-class EventBuffer {
-  constructor(span_width) {
+class Graph {
+  constructor(graph_age, canvas) {
     this.events = {};
     this.spans = {};
-    this.span_width = span_width;
-    this.last_span_width = -1;
+    this.graph_age = graph_age;
+    this.canvas = canvas;
     //TODO: keep a list of dirty spans so you don't have to iterate over the whole thing every time.
   }
 
-  get_span_id(timpstamp) {
+  get_span_id(timestamp) {
     Math.floor(timestamp, this.span_width);
   }
 
   append(event) {
-    icmp_seq = event['icmp_seq'];
-    if(event['msg_type'] == 'expected') {
-      this.events[icmp_seq] |= event;
+    let icmp_seq = event['icmp_seq'];
+    let span_id = this.get_span_id(event['timestamp']);
+    if(this.spans[span_id] == undefined) {
+      this.spans[span_id] = new Span();
+    }
+
+    //There are a few situations we have to deal with here. First, what happens if the 'expected'
+    //packet comes first, then the thing actually arrives? Frankly, this should be a TODO:, to
+    //make the behavior of ultra-late, post-timeout packets configurable. The default (what is
+    //implemented here) is that once a packet's timeout has elapsed, it's lost even if it arrives.
+
+    if(this.events[icmp_seq]) {
+      //TODO: later, make the behavior configurable?
     } else {
       this.events[icmp_seq] = event;
-    }
-    this.event[icmp_seq]['raw'] = undefined;
-
-    span_id = get_span_id(event['timestamp']);
-    this.spans[span_id] |= new Span();
-    this.spans[span_id].push(event);
-
-    //On the chance that a packet arrived in the current frame after it had been timed out in the
-    //previous frame:
-    if(this.spans[span_id-1]) {
-      this.spans[span_id-1].dirty = true;
+      this.spans[span_id].push(event);
     }
   }
 
@@ -201,23 +159,72 @@ class EventBuffer {
     }
   }
 
-  change_span_width(span_width) {
+  set_span_width(span_width) {
     this.span_width = span_width;
     rebuild_spans();
   }
-
 }
 
-class Graph {
-  constructor(canvas_name, event_buffer) {
-    this.canvas = document.getElementById(canvas_name);
-    this.context = this.canvas.getContext('2d');
-    this.event_buffer = event_buffer;
-    this.last_width = 0;
-    this.last_height = 0;
+class EventRouter {
+  constructor() {
+    self.endpoints = {}
+    self.event_buffers = {}
   }
 
-  redraw() {
+  activate_row(index) {
+    console.log('activating row ' + index);
+    document.getElementById('row'+index).style.display = undefined;
+    document.getElementById('raw_ping_row'+index).style.display = undefined;
+
+    if(self.event_buffers[index] == undefined) {
+      let longspan_element = document.getElementById('longspan_canvas'+index);
+      let shortspan_element = document.getElementById('shortspan_canvas'+index);
+      self.event_buffers[index] = [
+          new Graph(60*60, longspan_element),
+          new Graph(60*5), shortspan_element];
+    }
+  }
+
+  deactivate_row(index) {
+    console.log('deactivating row ' + index);
+    document.getElementById('row'+index).style.display = 'none';
+    document.getElementById('raw_ping_row'+index).style.display = 'none';
+
+    self.event_buffers[index] = undefined;
+  }
+
+  handle_endpoints_list(data) {
+    console.log('endpoint_list received:', data)
+
+    for(let index=0; index<5; index++) {
+      if(data.endpoints[index]) {
+        this.activate_row(index);
+      } else {
+        this.deactivate_row(index);
+      }
+    }
+  }
+
+  handle_message(event) {
+    if(event.msg_type == 'endpoints') {
+      this.handle_endpoints_list(event);
+      return;
+    }
+
+    let message = '';
+    if(event.msg_type == 'expected') {
+      message = 'Lost icmp_seq:' + event['icmp_seq'];
+    } else if(event.msg_type == 'pong') {
+      message = event['raw'];
+      //TODO: set event['raw'] to undefined to save the space. I'm leaving it for now for
+      // debugging reasons.
+    }
+    document.getElementById('raw_ping'+event.index).textContent = message;
+
+    console.log('index: ', (event['index'], 0));
+    console.log('event_buffers: ', event_buffers);
+    self.event_buffers[event['index']][0].append(event);
+    self.event_buffers[event['index']][1].append(event);
   }
 }
 
@@ -281,7 +288,7 @@ class DataRelay {
     this.event_source.onmessage = (event) => {
       const json_data=event.data;
       const data = JSON.parse(json_data);
-      rowManager.handle_message(data);
+      event_router.handle_message(data);
     };
     this.event_source.onerror = (error) => {
       console.error('event_source.onerror:', error);
@@ -291,7 +298,7 @@ class DataRelay {
 }
 
 let dataRelay = new DataRelay();
-let rowManager = new RowManager();
+let event_router = new EventRouter();
 let overlayManager = new OverlayManager();
 
 </script>
@@ -381,7 +388,6 @@ class PingManager():
         data['icmp_seq'] = icmp_seq
         data['index'] = endpoint_index
         data['timestamp'] = time.time() - self.endpoints[endpoint_index]['start_time']
-        print('expected icmp_seq:', data)
         events.append(encode_as_wire_message(data))
 
       time_to_check -= self.interval
