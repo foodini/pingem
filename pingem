@@ -41,58 +41,53 @@ print(cl_args)
 ping = shutil.which('ping')
 print('using ping binary at:' + ping)
 
-#TODO: I'd like to be able to accomplish this by using cloneNode, but if I clone
-#      an entire row of a table, the ids of the individual cells aren't unique
-#      and are therefore a pain in the ass to locate. This way, I can get them
-#      with getElementById. There's probably a better way.
 #TODO: Replace the X with an "icon" (a couple lines on canvas.)
 row_def = '''
-<tr id=row{y}>
-  <td id=longspan_td{y} class=graph_canvas border=0>
-    <canvas id=longspan_canvas{y}>
-    </canvas>
-  </td>
-  <td id=shortspan_td{y} class=graph_canvas border=0>
-    <canvas id=shortspan_canvas{y}>
-    </canvas>
-  </td>
-  <td valign=top>
-    <button id=halt{y} onclick='halt({y});'>X</button>
-  </td>
-  <td class=detail id=detail{y} rowspan=2>
-    <canvas id=detail{y}>
-    </canvas>
-  </td>
-</tr>
-<tr id=raw_ping_row{y} height=40px>
-  <td colspan=3 id=raw_ping{y} class='terminal'>raw_ping{y}</td>
-</tr>
+<div id=row{y}>
+  <div class=status_row>
+    <div class=cell>X</div>
+    <div class='terminal cell' id=raw_ping{y}></div>
+    <div class=cell>Reserved for future use</div>
+  </div>
+  <div class=graph_row>
+    <div class=cell>
+      <canvas id=longspan_canvas{y}>
+      </canvas>
+    </div>
+    <div class=cell>
+      <canvas id=shortspan_canvas{y}>
+      </canvas>
+    </div>
+    <div class=cell>
+      <canvas id=detail{y}>
+      </canvas>
+    </div>
+  </div>
+</div>
 '''
+
 
 index = '''
 <html>
 <head>
 <title>pingem v1.0e-20</title>
 <style>
-  canvas{width:100%;height:100%}
   #overlayCanvas{
     position:fixed;top:0;left:0;bottom:0;right:0;z-index:10;pointerevents:'none';}
+  #div{width=100vh;height=100vh;}
   body{background-color:black;color:white;overflow:hidden;}
-  tr{border-right:0px;border-left:0px;border-top:0px;}
   .terminal{font-family:monospace;}
+  .status_row{display:grid;grid-template-columns:24px 1fr 25%;}
+  .graph_row{display:grid;grid-template-columns:35% 40% 25%;}
+  .cell{border:1px solid grey;padding:2px;}
+  .display_layout{height=100vh;display:grid;grid-auto-rows:1fr;}
 </style>
 </head>
 <body>
 <canvas id='overlayCanvas'></canvas>
-<table id='layout' table-layout:fixed width=100% height=100% border=1 cellspacing=0 cellpadding=0>
-<tr height=0%>
-  <td colspan=3>
-    <input id=endpoint value='add endpoint'>
-    <button onclick='add_endpoint();'>Add!</button>
-  </td>
-</tr>
-ROWS
-</table>
+<div class=display_layout>
+  ROWS
+</div>
 <script type='text/javascript' defer>
 class Span {
   constructor() {
@@ -206,7 +201,6 @@ class EventRouter {
   activate_row(index) {
     console.log('activating row ' + index);
     document.getElementById('row'+index).style.display = undefined;
-    document.getElementById('raw_ping_row'+index).style.display = undefined;
 
     if(self.event_buffers[index] == undefined) {
       let longspan_canvas = document.getElementById('longspan_canvas'+index);
@@ -220,7 +214,6 @@ class EventRouter {
   deactivate_row(index) {
     console.log('deactivating row ' + index);
     document.getElementById('row'+index).style.display = 'none';
-    document.getElementById('raw_ping_row'+index).style.display = 'none';
 
     self.event_buffers[index] = undefined;
   }
@@ -495,6 +488,7 @@ class RequestHandler(BaseHTTPRequestHandler):
       rows += row_def.format(y=row_id)
     hydrated_index = index.replace('SECRET', str(secret))
     hydrated_index = hydrated_index.replace('ROWS', rows)
+    print(hydrated_index)
     self.wfile.write(bytes(hydrated_index, 'utf8'))
 
   def send_endpoint_update(self):
