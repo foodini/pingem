@@ -12,6 +12,10 @@
 # * Maybe an actual favicon.ico? Just pack it as a string?
 # * Allow user to alter packet size. (-s argument) Maybe have multiple sizes in
 #   same line? I'm not sure how that graph would look.
+# * I don't like organizing the endpoints by numeric index on the python side.
+#   I'd rather that just be a UI-side thing, but this way, the command-line order
+#   is preserved all the way through to the UI. As I said, I really don't like
+#   it.
 
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,6 +30,8 @@ from threading import Thread
 import time
 from urllib.parse import urlparse, parse_qs
 import webbrowser
+
+MAX_ENDPOINTS = 5
 
 parser = argparse.ArgumentParser(
   description='pingem [-i interval] endpoint [endpoint [endpoint...]]')
@@ -43,27 +49,28 @@ print('using ping binary at:' + ping)
 
 #TODO: Replace the X with an "icon" (a couple lines on canvas.)
 row_def = '''
-<div id=row{y}>
-  <div class=status_row>
-    <div class=cell>X</div>
-    <div class='terminal cell' id=raw_ping{y}></div>
-    <div class=cell>Reserved for future use</div>
-  </div>
-  <div class=graph_row>
-    <div class=cell>
-      <canvas id=longspan_canvas{y}>
-      </canvas>
-    </div>
-    <div class=cell>
-      <canvas id=shortspan_canvas{y}>
-      </canvas>
-    </div>
-    <div class=cell>
-      <canvas id=detail{y}>
-      </canvas>
-    </div>
-  </div>
-</div>
+<tr id=tr_raw{y}>
+  <td colspan=3>
+    <button class=close_button>X</button> <div class='terminal cell' id=raw_pong{y}></div>
+  </td>
+</tr>
+<tr id=tr_data{y}>
+  <td id='graph_container_{y}_0' class='graph_container'>
+    <canvas id='data_canvas_{y}_0' class='data_canvas'></canvas>
+    <canvas id='label_canvas_{y}_0' class='label_canvas'></canvas>
+    <canvas id='cursor_canvas_{y}_0' class='cursor_canvas'></canvas>
+  </td>
+  <td id='graph_container_{y}_1' class='graph_container'>
+    <canvas id='data_canvas_{y}_1' class='data_canvas'></canvas>
+    <canvas id='label_canvas_{y}_1' class='label_canvas'></canvas>
+    <canvas id='cursor_canvas_{y}_1' class='cursor_canvas'></canvas>
+  </td>
+  <td id='graph_container_{y}_2' class='graph_container'>
+    <canvas id='data_canvas_{y}_2' class='data_canvas'></canvas>
+    <canvas id='label_canvas_{y}_2' class='label_canvas'></canvas>
+    <canvas id='cursor_canvas_{y}_2' class='cursor_canvas'></canvas>
+  </td>
+</tr>
 '''
 
 
@@ -72,22 +79,25 @@ index = '''
 <head>
 <title>pingem v1.0e-20</title>
 <style>
-  #overlayCanvas{
-    position:fixed;top:0;left:0;bottom:0;right:0;z-index:10;pointerevents:'none';}
   #div{width=100vh;height=100vh;}
   body{background-color:black;color:white;overflow:hidden;}
-  .terminal{font-family:monospace;}
+  .terminal{ display:inline-block; font-family:monospace; }
   .status_row{display:grid;grid-template-columns:24px 1fr 25%;}
   .graph_row{display:grid;grid-template-columns:35% 40% 25%;}
-  .cell{border:1px solid grey;padding:2px;}
-  .display_layout{height=100vh;display:grid;grid-auto-rows:1fr;}
+  .graph_container { position:absolute; border:1px solid grey; padding:2px; }
+  .graph_container > canvas { position:absolute; left:0; top:0; }
+  .display_layout{cellpadding:0;border:1;}
+  .graph_container { position: relative; }
+  .data_canvas { z-index:0; }
+  .label_canvas { z-index:1; }
+  .cursor_canvas { z-index:2; }
+  .close_button { display:inline-block; }
 </style>
 </head>
 <body>
-<canvas id='overlayCanvas'></canvas>
-<div class=display_layout>
+<table class=display_layout>
   ROWS
-</div>
+</table>
 <script type='text/javascript' defer>
 class Span {
   constructor() {
@@ -119,16 +129,35 @@ class Span {
 }
 
 class Graph {
-  constructor(graph_age, canvas) {
+  constructor(graph_age, row_index, col_index) {
     this.events = {};
     this.spans = {};
     this.graph_age = graph_age;
-    this.canvas = canvas;
-    console.log('Graph constructed with canvas:', canvas);
-    this.context = canvas.getContext('2d');
+    this.data_canvas = document.getElementById('data_canvas_'+row_index+'_'+col_index);
+    this.label_canvas = document.getElementById('label_canvas_'+row_index+'_'+col_index);
+    this.cursor_canvas = document.getElementById('cursor_canvas_'+row_index+'_'+col_index);
+    this.data_context = this.data_canvas.getContext('2d');
+    this.label_context = this.label_canvas.getContext('2d');
+    this.cursor_context = this.cursor_canvas.getContext('2d');
+    this.graph_container = document.getElementById('graph_container_'+row_index+'_'+col_index);
     //TODO: keep a list of dirty spans so you don't have to iterate over the whole thing every time.
+  }
 
-    this.redraw();
+  set_geometry(width, height) {
+    this.width = width;
+    this.height = height;
+
+    for(var canvas of [this.data_canvas, this.label_canvas, this.cursor_canvas]) {
+      canvas.style.width = this.width;
+      canvas.style.height = this.height;
+      canvas.width = this.width;
+      canvas.height = this.height;
+    }
+
+    this.graph_container.width = this.width;
+    this.graph_container.height = this.height 
+      + 2 /* I've no idea why this is necessary in the y but not x. */
+      ;
   }
 
   get_span_id(timestamp) {
@@ -153,6 +182,8 @@ class Graph {
       this.events[icmp_seq] = event;
       this.spans[span_id].push(event);
     }
+
+    this.redraw();
   }
 
   rebuild_spans() {
@@ -173,61 +204,114 @@ class Graph {
   }
 
   redraw() {
-    let canvas = this.canvas;
-    let ctx = this.context;
-    ctx.globalCompositeOperation='lighter';
-    ctx.fillStyle = 'rgba(255,0,0,0.2)';
+    let width = this.data_canvas.width;
+    let height = this.data_canvas.height;
 
-    let width = canvas.width;
-    let height = canvas.height;
+    this.data_context.globalCompositeOperation='lighter';
+    this.data_context.fillStyle = 'rgb(255,0,0)';
+    this.data_context.fillRect(0, 0, width, height);
 
-    for(let dpx=5; dpx<35; dpx+=5) {
-      ctx.fillRect(dpx, dpx, width-dpx*2, height-dpx*2);
-    }
+    this.label_context.globalCompositeOperation='lighter';
+    this.label_context.fillStyle = 'rgb(0,255,0)';
+    this.label_context.fillRect(10, 10, width-20, height-20);
 
-    ctx.globalCompositeOperation='source-over';
-    ctx.fillStyle = 'black';
-    ctx.font='20px Courier';
-    ctx.fillText(''+width+'x'+height, 25, 25);
+    this.cursor_context.globalCompositeOperation='lighter';
+    this.cursor_context.fillStyle = 'rgb(0,0,255)';
+    this.cursor_context.fillRect(20, 20, width-40, height-40);
+
+    this.cursor_context.globalCompositeOperation='source-over';
+    this.cursor_context.fillStyle = 'black';
+    this.cursor_context.font='20px Courier';
+    this.cursor_context.fillText(''+width+'x'+height, 25, 25);
   }
 }
 
-class EventRouter {
+class LayoutManager {
   constructor() {
-    self.endpoints = {}
-    self.event_buffers = {}
+    this.endpoints = {}
+    this.event_buffers = {}
+
+    const resizeObserver = new ResizeObserver(entries => {
+      layout_manager.on_resize();
+    });
+    resizeObserver.observe(document.body);
+
+    this.width = window.innerWidth;
+    this.height = window.innerHeight;
+  }
+
+  get_row_count() {
+    return Object.keys(this.event_buffers).length;
+  }
+
+  on_resize() {
+    this.width = window.innerWidth;
+    this.height = window.innerHeight;
+
+    /* TODO: better heuristics for the height of "stuff." */
+    var num_rows = this.get_row_count();
+    var inner_height = this.height
+      - 14 /* room for top and bottom borders. TODO: remove magic numbers */
+      ;
+    this.row_height = Math.floor(this.height / num_rows)
+      - 5 * 2 /* room for borders between rows and between raw pongs and graphs */
+      ;
+    this.pong_height = 26; /* TODO: needs to be dependent upon height of text, border thickness. */
+    this.data_height = this.row_height - this.pong_height;
+
+    var inner_width = this.width
+      -10 /* rooom for left and right borders. TODO: remove magic numbers */
+      ;
+    this.data_width = (inner_width / 3 ) /* Three columns. TODO: magic number. */
+      - 5 /* room for borders between columns */
+      ;
+
+    console.log('setting geometries to ' + this.data_width + ',' + this.data_height);
+    for(var index of Object.keys(this.event_buffers)) {
+      if(this.event_buffers[index] != undefined) {
+        /* TODO: how to handle the third column? It's not going to be a Graph type. */
+        this.event_buffers[index][0].set_geometry(this.data_width, this.data_height);
+        this.event_buffers[index][1].set_geometry(this.data_width, this.data_height);
+      }
+    }
   }
 
   activate_row(index) {
     console.log('activating row ' + index);
-    document.getElementById('row'+index).style.display = undefined;
+    document.getElementById('tr_raw'+index).style.display = 'table-row';
+    document.getElementById('tr_data'+index).style.display = 'table-row';
 
-    if(self.event_buffers[index] == undefined) {
-      let longspan_canvas = document.getElementById('longspan_canvas'+index);
-      let shortspan_canvas = document.getElementById('shortspan_canvas'+index);
-      self.event_buffers[index] = [
-          new Graph(60*60, longspan_canvas),
-          new Graph(60*5, shortspan_canvas)];
+    if(this.event_buffers[index] == undefined) {
+      let longspan_canvas = document.getElementById('graph_container_'+index+'_0');
+      let shortspan_canvas = document.getElementById('graph_container'+index+'_1');
+      this.event_buffers[index] = [
+          new Graph(60*60, index, 0),
+          new Graph(60*5, index, 1)];
     }
   }
 
   deactivate_row(index) {
     console.log('deactivating row ' + index);
-    document.getElementById('row'+index).style.display = 'none';
+    document.getElementById('tr_raw'+index).style.display = 'none';
+    document.getElementById('tr_data'+index).style.display = 'none';
 
-    self.event_buffers[index] = undefined;
+    delete(this.event_buffers[index]);
   }
 
   handle_endpoints_list(data) {
     console.log('endpoint_list received:', data)
+    this.endpoints = {};
 
-    for(let index=0; index<5; index++) {
+    for(let index=0; index<MAX_ENDPOINTS; index++) {
       if(data.endpoints[index]) {
         this.activate_row(index);
+        this.endpoints[index] = data.endpoints[index];
       } else {
         this.deactivate_row(index);
       }
     }
+
+    this.on_resize();
   }
 
   handle_message(event) {
@@ -244,15 +328,15 @@ class EventRouter {
       //TODO: set event['raw'] to undefined to save the space. I'm leaving it for now for
       // debugging reasons.
     }
-    document.getElementById('raw_ping'+event.index).textContent = message;
+    document.getElementById('raw_pong'+event.index).textContent = 
+      '[' + this.endpoints[event['index']] + ']  ' + message;
 
-    console.log('index: ', (event['index'], 0));
-    console.log('event_buffers: ', event_buffers);
-    self.event_buffers[event['index']][0].append(event);
-    self.event_buffers[event['index']][1].append(event);
+    this.event_buffers[event['index']][0].append(event);
+    this.event_buffers[event['index']][1].append(event);
   }
 }
 
+/* DEPRECATED
 class OverlayManager {
   constructor() {
     this.canvas = document.getElementById('overlayCanvas');
@@ -303,28 +387,28 @@ class OverlayManager {
     this.last_cursor_width = this.cursor_width;
   }
 }
+*/
 
+/*TODO: this doesn't really need to be a class.*/
 class DataRelay {
   constructor() {
-    console.log('constructor called');
     const stream_url = '/stream/?secret='+SECRET;
     this.name = 'foo';
     this.event_source = new EventSource(stream_url);
     this.event_source.onmessage = (event) => {
       const json_data=event.data;
       const data = JSON.parse(json_data);
-      event_router.handle_message(data);
+      layout_manager.handle_message(data);
     };
     this.event_source.onerror = (error) => {
       console.error('event_source.onerror:', error);
     };
-    console.log('handler is supposedly set up');
+    console.log('data stream handler is set up');
   }
 }
 
-let dataRelay = new DataRelay();
-let event_router = new EventRouter();
-let overlayManager = new OverlayManager();
+let data_relay = new DataRelay();
+let layout_manager = new LayoutManager();
 
 </script>
 </body>
@@ -364,7 +448,7 @@ class PingManager():
   def add_endpoint(self, endpoint_name):
     #TODO: at startup, work out the location of ping binary
     endpoint_index = None
-    for index in range(5):
+    for index in range(MAX_ENDPOINTS):
       if index not in self.endpoints:
         endpoint_index = index
         break
@@ -384,15 +468,13 @@ class PingManager():
     now = time.time()
     elapsed = now - self.endpoints[endpoint_index]['start_time']
     #Compute how many 65k runs we should expect to have completed:
-    runs = (65536.0 * self.interval)/(elapsed)
+    runs = elapsed/(65536.0 * self.interval)
     runs_fract, runs_floor = math.modf(runs)
     runs_floor = int(runs_floor)
 
-    if runs_fract >= 0.8:
-      if narrow < 32768:
+    if runs_fract >= 0.8 and narrow < 32768:
         return narrow + (65536 * runs_floor + 1)
-    elif runs_fract < 0.2:
-      if narrow > 32768:
+    elif runs_fract < 0.2 and narrow > 32768:
         return narrow + (65536 * runs_floor - 1)
     else:
       return narrow + 65536 * runs_floor
@@ -430,7 +512,6 @@ class PingManager():
 
       readable_stdouts, _, _ = select.select(stdouts, [], [])
       for stdout in readable_stdouts:
-        print(endpoint_index, end='', flush=True)
         line = stdout.readline().decode().strip()
         match = re.search(self.successful_response_regex, line)
         if match:
@@ -438,6 +519,7 @@ class PingManager():
           data['msg_type'] = 'pong'
           data['responder'] = match.group(1)
           icmp_seq = self.get_wide_icmp_seq(int(match.group(2)), endpoint_index)
+          print(self.endpoints[endpoint_index]['endpoint_name'], icmp_seq, line)
           data['icmp_seq'] = icmp_seq
           data['ttl'] = int(match.group(3))
           data['rtt'] = float(match.group(4))
@@ -484,11 +566,11 @@ class RequestHandler(BaseHTTPRequestHandler):
     # sees a {, which javascript and css kick in all the time. I don't want to
     # have to use \{ every time.....
     rows = ''
-    for row_id in range(5):
+    for row_id in range(MAX_ENDPOINTS):
       rows += row_def.format(y=row_id)
     hydrated_index = index.replace('SECRET', str(secret))
     hydrated_index = hydrated_index.replace('ROWS', rows)
-    print(hydrated_index)
+    hydrated_index = hydrated_index.replace('MAX_ENDPOINTS', str(MAX_ENDPOINTS))
     self.wfile.write(bytes(hydrated_index, 'utf8'))
 
   def send_endpoint_update(self):
