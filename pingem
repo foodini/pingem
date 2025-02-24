@@ -49,7 +49,7 @@ print('using ping binary at:' + ping)
 
 #TODO: Replace the X with an "icon" (a couple lines on canvas.)
 row_def = '''
-<tr id=tr_raw{y}>
+<tr id=tr_raw{y} class=tr_raw>
   <td colspan=3>
     <button class=close_button>X</button> <div class='terminal cell' id=raw_pong{y}></div>
   </td>
@@ -79,7 +79,6 @@ index = '''
 <head>
 <title>pingem v1.0e-20</title>
 <style>
-  #div{width=100vh;height=100vh;}
   body{background-color:black;color:white;overflow:hidden;}
   .terminal{ display:inline-block; font-family:monospace; }
   .status_row{display:grid;grid-template-columns:24px 1fr 25%;}
@@ -99,40 +98,12 @@ index = '''
   ROWS
 </table>
 <script type='text/javascript' defer>
-class Span {
-  constructor() {
-    this.rtts = [];
-    this.lost = 0;
-    this.total_rtt_time = 0.0;
-    this.dirty = true;
-    this.events = {};
-  }
-
-  push(event) {
-    this.events[event['icmp_seq']] = event;
-    this.dirty = true;
-    this.total += 1;
-    if(event['event_type'] == 'pong') {
-      this.total_rtt_time += event['rtt'];
-    } else {
-      this.lost += 1;
-    }
-  }
-
-  get_stats() {
-    if(this.dirty) {
-      this.stats = new Object();
-      this.rtts.sort(function(a,b) { return a-b;}); // REALLY, Javascript? Fuck you.
-      stats.rtts = this.rtts;
-    }
-  }
-}
-
 class Graph {
   constructor(graph_age, row_index, col_index) {
     this.events = {};
-    this.spans = {};
     this.graph_age = graph_age;
+    this.prev_max_rtt = 0.5;
+    this.first_active_event = 0;
     this.data_canvas = document.getElementById('data_canvas_'+row_index+'_'+col_index);
     this.label_canvas = document.getElementById('label_canvas_'+row_index+'_'+col_index);
     this.cursor_canvas = document.getElementById('cursor_canvas_'+row_index+'_'+col_index);
@@ -140,7 +111,6 @@ class Graph {
     this.label_context = this.label_canvas.getContext('2d');
     this.cursor_context = this.cursor_canvas.getContext('2d');
     this.graph_container = document.getElementById('graph_container_'+row_index+'_'+col_index);
-    //TODO: keep a list of dirty spans so you don't have to iterate over the whole thing every time.
   }
 
   set_geometry(width, height) {
@@ -154,53 +124,33 @@ class Graph {
       canvas.height = this.height;
     }
 
-    this.graph_container.width = this.width;
-    this.graph_container.height = this.height 
-      + 2 /* I've no idea why this is necessary in the y but not x. */
+    this.graph_container.width = this.width 
+      - 5 /* I've no idea why this is necessary */
       ;
-  }
-
-  get_span_id(timestamp) {
-    Math.floor(timestamp, this.span_width);
+    this.graph_container.height = this.height 
+      + 2 /* I've no idea why this is necessary */
+      ;
   }
 
   append(event) {
     let icmp_seq = event['icmp_seq'];
-    let span_id = this.get_span_id(event['timestamp']);
-    if(this.spans[span_id] == undefined) {
-      this.spans[span_id] = new Span();
-    }
 
     //There are a few situations we have to deal with here. First, what happens if the 'expected'
     //packet comes first, then the thing actually arrives? Frankly, this should be a TODO:, to
     //make the behavior of ultra-late, post-timeout packets configurable. The default (what is
     //implemented here) is that once a packet's timeout has elapsed, it's lost even if it arrives.
 
+    // If the event already exists, either the actual packet arrived first and we should throw out
+    // the timeout packet we just received, or the timeout packet already arrived and we're
+    // receiving the (very late) pong from the echo endpoint. In this case, it's timed out ands
+    // dropped.
     if(this.events[icmp_seq]) {
       //TODO: later, make the behavior configurable?
     } else {
       this.events[icmp_seq] = event;
-      this.spans[span_id].push(event);
     }
 
     this.redraw();
-  }
-
-  rebuild_spans() {
-    this.spans = {}
-
-    span_start_time = 0.0;
-    span_end_time = this.span_width;
-    for(const event of this.events) {
-      span_id = get_span_id(event['timestamp']);
-      this.spans[span_id] |= new Span();
-      this.spans[span_id].push(event);
-    }
-  }
-
-  set_span_width(span_width) {
-    this.span_width = span_width;
-    rebuild_spans();
   }
 
   redraw() {
@@ -224,12 +174,41 @@ class Graph {
     this.cursor_context.font='20px Courier';
     this.cursor_context.fillText(''+width+'x'+height, 25, 25);
   }
+
+  new_redraw() {
+    // vvvvvvvvv DO NOT CHANGE THE ORDER vvvvvvvvv
+    let prev_max_rtt = LayoutManager.get_prev_max_rtt();
+    this.prev_max_rtt = 0.0;
+    // ^^^^^^^^^ DO NOT CHANGE THE ORDER ^^^^^^^^^
+
+    let width = this.data_canvas.width;
+    let height = this.data_canvas.height;
+    let now = Date.now();
+
+    // We need to go through all of this.events and render each rtt's plot point into the canvas.
+    for (var i=this.first_active_event; i<events.length; i++) {
+      if (event['timestamp'] < now - this.graph_age) {
+        this.first_active_event++;
+      } else {
+        const event = events[i];
+        this.prev_max_rtt = Math.max(this.prev_max_rtt, event['rtt']);
+      }
+    }
+
+
+    this.data_context.clearRect(0, 0, width, height);
+    this.data_context.globalCompositeOperation='lighter';
+    
+  }
 }
 
 class LayoutManager {
   constructor() {
+    // Just a map of row index to the command-line endpoint name:
     this.endpoints = {}
-    this.event_buffers = {}
+
+    // A 2D map keyed first on row index, then a list of 2 graphs.
+    this.graphs = {}
 
     const resizeObserver = new ResizeObserver(entries => {
       layout_manager.on_resize();
@@ -240,8 +219,12 @@ class LayoutManager {
     this.height = window.innerHeight;
   }
 
+  get_prev_max_rtt() {
+    return 0.5; // TODO: THIS IS A PLACEHOLDER! Actually call each graph to get max.
+  }
+
   get_row_count() {
-    return Object.keys(this.event_buffers).length;
+    return Object.keys(this.graphs).length;
   }
 
   on_resize() {
@@ -267,11 +250,11 @@ class LayoutManager {
       ;
 
     console.log('setting geometries to ' + this.data_width + ',' + this.data_height);
-    for(var index of Object.keys(this.event_buffers)) {
-      if(this.event_buffers[index] != undefined) {
+    for(var index of Object.keys(this.graphs)) {
+      if(this.graphs[index] != undefined) {
         /* TODO: how to handle the third column? It's not going to be a Graph type. */
-        this.event_buffers[index][0].set_geometry(this.data_width, this.data_height);
-        this.event_buffers[index][1].set_geometry(this.data_width, this.data_height);
+        this.graphs[index][0].set_geometry(this.data_width, this.data_height);
+        this.graphs[index][1].set_geometry(this.data_width, this.data_height);
       }
     }
   }
@@ -281,10 +264,8 @@ class LayoutManager {
     document.getElementById('tr_raw'+index).style.display = 'table-row';
     document.getElementById('tr_data'+index).style.display = 'table-row';
 
-    if(this.event_buffers[index] == undefined) {
-      let longspan_canvas = document.getElementById('graph_container_'+index+'_0');
-      let shortspan_canvas = document.getElementById('graph_container'+index+'_1');
-      this.event_buffers[index] = [
+    if(this.graphs[index] == undefined) {
+      this.graphs[index] = [
           new Graph(60*60, index, 0),
           new Graph(60*5, index, 1)];
     }
@@ -295,7 +276,7 @@ class LayoutManager {
     document.getElementById('tr_raw'+index).style.display = 'none';
     document.getElementById('tr_data'+index).style.display = 'none';
 
-    delete(this.event_buffers[index]);
+    delete(this.graphs[index]);
   }
 
   handle_endpoints_list(data) {
@@ -312,6 +293,8 @@ class LayoutManager {
     }
 
     this.on_resize();
+    console.log('endpoints:');
+    console.log(this.endpoints);
   }
 
   handle_message(event) {
@@ -331,62 +314,62 @@ class LayoutManager {
     document.getElementById('raw_pong'+event.index).textContent = 
       '[' + this.endpoints[event['index']] + ']  ' + message;
 
-    this.event_buffers[event['index']][0].append(event);
-    this.event_buffers[event['index']][1].append(event);
+    this.graphs[event['index']][0].append(event);
+    this.graphs[event['index']][1].append(event);
   }
 }
 
 /* DEPRECATED
-class OverlayManager {
-  constructor() {
-    this.canvas = document.getElementById('overlayCanvas');
-    this.context = this.canvas.getContext('2d');
-
-    console.log('OverlayManager.canvas:', this.canvas);
-    this.canvas.width = window.innerWidth;
-    this.canvas.height = window.innerHeight;
-    this.cursor_width = 75;
-
-    this.last_cursor_x = 0;
-    this.last_cursor_width = this.cursor_width;
-
-    this.canvas.addEventListener('wheel', (event) => {
-      event.preventDefault();
-      this.cursor_width -= event.deltaY/120;
-      if(this.cursor_width < 1) {
-        this.cursor_width = 1;
-      }
-      this.draw_cursor(this.last_cursor_x);
-    });
-
-    this.canvas.addEventListener('mousemove', (event) => {
-      this.draw_cursor(event.clientX);
-    });
-  }
-
-  draw_cursor(x) {
-    this.context.clearRect(
-      this.last_cursor_x - this.last_cursor_width/2 - 1, 0,
-      this.last_cursor_width + 2, this.canvas.height);
-
-    this.context.beginPath();
-    this.context.lineWidth = this.cursor_width
-    this.context.strokeStyle = '#0000ff80';
-    this.context.moveTo(x, 0);
-    this.context.lineTo(x, this.canvas.height-1);
-    this.context.stroke();
-
-    this.context.beginPath();
-    this.context.lineWidth = 1;
-    this.context.strokeStyle = 'red';
-    this.context.moveTo(x, 0);
-    this.context.lineTo(x, this.canvas.height-1);
-    this.context.stroke();
-
-    this.last_cursor_x = x;
-    this.last_cursor_width = this.cursor_width;
-  }
-}
+//class OverlayManager {
+//  constructor() {
+//    this.canvas = document.getElementById('overlayCanvas');
+//    this.context = this.canvas.getContext('2d');
+//
+//    console.log('OverlayManager.canvas:', this.canvas);
+//    this.canvas.width = window.innerWidth;
+//    this.canvas.height = window.innerHeight;
+//    this.cursor_width = 75;
+//
+//    this.last_cursor_x = 0;
+//    this.last_cursor_width = this.cursor_width;
+//
+//    this.canvas.addEventListener('wheel', (event) => {
+//      event.preventDefault();
+//      this.cursor_width -= event.deltaY/120;
+//      if(this.cursor_width < 1) {
+//        this.cursor_width = 1;
+//      }
+//      this.draw_cursor(this.last_cursor_x);
+//    });
+//
+//    this.canvas.addEventListener('mousemove', (event) => {
+//      this.draw_cursor(event.clientX);
+//    });
+//  }
+//
+//  draw_cursor(x) {
+//    this.context.clearRect(
+//      this.last_cursor_x - this.last_cursor_width/2 - 1, 0,
+//      this.last_cursor_width + 2, this.canvas.height);
+//
+//    this.context.beginPath();
+//    this.context.lineWidth = this.cursor_width
+//    this.context.strokeStyle = '#0000ff80';
+//    this.context.moveTo(x, 0);
+//    this.context.lineTo(x, this.canvas.height-1);
+//    this.context.stroke();
+//
+//    this.context.beginPath();
+//    this.context.lineWidth = 1;
+//    this.context.strokeStyle = 'red';
+//    this.context.moveTo(x, 0);
+//    this.context.lineTo(x, this.canvas.height-1);
+//    this.context.stroke();
+//
+//    this.last_cursor_x = x;
+//    this.last_cursor_width = this.cursor_width;
+//  }
+//}
 */
 
 /*TODO: this doesn't really need to be a class.*/
@@ -535,13 +518,11 @@ class PingManager():
 
 #TODO: Get this constant in the class
 class RequestHandler(BaseHTTPRequestHandler):
-  def authorizeish(self):
-    # Eventually, I'll want to hide the secret in headers..
+  def check_secret(self):
+    # TODO: get the secret out of the url so it can't be shoulder-surfed. This isn't a sufficiently
+    #       critical app to do any real user auth. If the user started the app, that's good enough.
     self.parsed_url = urlparse(self.path)
     self.query_params = parse_qs(self.parsed_url.query)
-
-    #TODO: get rid of early exit:
-    return True
 
     if ('secret' not in self.query_params or
         type(self.query_params['secret']) != list or
@@ -571,7 +552,9 @@ class RequestHandler(BaseHTTPRequestHandler):
     hydrated_index = index.replace('SECRET', str(secret))
     hydrated_index = hydrated_index.replace('ROWS', rows)
     hydrated_index = hydrated_index.replace('MAX_ENDPOINTS', str(MAX_ENDPOINTS))
-    self.wfile.write(bytes(hydrated_index, 'utf8'))
+    encoded_index = bytes(hydrated_index, 'utf8')
+    self.send_header('Content-Length', len(encoded_index))
+    self.wfile.write(encoded_index)
 
   def send_endpoint_update(self):
     data = {}
@@ -598,22 +581,23 @@ class RequestHandler(BaseHTTPRequestHandler):
 
   def do_GET(self):
     if('favicon.ico' in self.path):
-      #Can I reject the request silently, w/o response?
-      return
-
-    if(not self.authorizeish()):
-      #TODO: More info. Maybe even dump to a log?
-      print('failed to authorize:' + self.path)
-      raise PermissionError('Auth failure. TODO: more info in this message.')
-
-    if(self.parsed_url.path == '/'):
-      self.serve_index()
+      self.send_error(404, "Resource not found")
     else:
-      self.serve_stream()
+      if(not self.check_secret()):
+        print('failed to authorize:' + self.path)
+        raise PermissionError('Auth failure. TODO: more info in this message.')
+
+      if(self.parsed_url.path == '/'):
+        self.serve_index()
+      elif(self.parsed_url.path == '/stream/'):
+        self.serve_stream()
+
+    self.finish()
+    self.connection.close()
 
 def run(server_class=ThreadingHTTPServer, handler_class=RequestHandler):
   #TODO: allow the port number to be dynamically assigned.
-  server_address = ('', 8000) # serve on all interfaces, port 8000
+  server_address = ('', 8000) # serve on all interfaces, port 80
   httpd = server_class(server_address, handler_class)
   t = Thread(target=start_browser)
   t.run()
