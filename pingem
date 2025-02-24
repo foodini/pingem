@@ -83,10 +83,9 @@ index = '''
   .terminal{ display:inline-block; font-family:monospace; }
   .status_row{display:grid;grid-template-columns:24px 1fr 25%;}
   .graph_row{display:grid;grid-template-columns:35% 40% 25%;}
-  .graph_container { position:absolute; border:1px solid grey; padding:2px; }
+  .graph_container { position:relative; border:1px solid grey; padding:2px; }
   .graph_container > canvas { position:absolute; left:0; top:0; }
   .display_layout{cellpadding:0;border:1;}
-  .graph_container { position: relative; }
   .data_canvas { z-index:0; }
   .label_canvas { z-index:1; }
   .cursor_canvas { z-index:2; }
@@ -101,6 +100,7 @@ index = '''
 class Graph {
   constructor(graph_age, row_index, col_index) {
     this.events = {};
+    this.latest_event = -1;
     this.graph_age = graph_age;
     this.prev_max_rtt = 0.5;
     this.first_active_event = 0;
@@ -111,6 +111,8 @@ class Graph {
     this.label_context = this.label_canvas.getContext('2d');
     this.cursor_context = this.cursor_canvas.getContext('2d');
     this.graph_container = document.getElementById('graph_container_'+row_index+'_'+col_index);
+
+    this.dot_width = 5;
   }
 
   set_geometry(width, height) {
@@ -135,6 +137,9 @@ class Graph {
   append(event) {
     let icmp_seq = event['icmp_seq'];
 
+    this.latest_event = Math.max(icmp_seq, this.latest_event);
+
+
     //There are a few situations we have to deal with here. First, what happens if the 'expected'
     //packet comes first, then the thing actually arrives? Frankly, this should be a TODO:, to
     //make the behavior of ultra-late, post-timeout packets configurable. The default (what is
@@ -153,7 +158,7 @@ class Graph {
     this.redraw();
   }
 
-  redraw() {
+  _redraw() {
     let width = this.data_canvas.width;
     let height = this.data_canvas.height;
 
@@ -175,30 +180,45 @@ class Graph {
     this.cursor_context.fillText(''+width+'x'+height, 25, 25);
   }
 
-  new_redraw() {
+  draw_event(event_age, rtt, max_rtt) {
+    let x = (this.data_canvas.width - this.dot_width) * (1 - event_age/this.graph_age);
+    let y = (this.data_canvas.height) * rtt/max_rtt;
+
+    this.data_context.beginPath();
+    this.moveTo(x,y-2);
+    this.lineTo(x,y+2);
+    this.data_context.stroke();
+  }
+
+  redraw() {
     // vvvvvvvvv DO NOT CHANGE THE ORDER vvvvvvvvv
-    let prev_max_rtt = LayoutManager.get_prev_max_rtt();
-    this.prev_max_rtt = 0.0;
+    let prev_max_rtt = layout_manager.get_prev_max_rtt();
+    let new_max_rtt = 0.0;
     // ^^^^^^^^^ DO NOT CHANGE THE ORDER ^^^^^^^^^
 
     let width = this.data_canvas.width;
     let height = this.data_canvas.height;
     let now = Date.now();
 
-    // We need to go through all of this.events and render each rtt's plot point into the canvas.
-    for (var i=this.first_active_event; i<events.length; i++) {
-      if (event['timestamp'] < now - this.graph_age) {
-        this.first_active_event++;
-      } else {
-        const event = events[i];
-        this.prev_max_rtt = Math.max(this.prev_max_rtt, event['rtt']);
-      }
-    }
-
-
     this.data_context.clearRect(0, 0, width, height);
     this.data_context.globalCompositeOperation='lighter';
-    
+    this.data_context.lineWidth = this.dot_width;
+    this.data_context.strokeStyle = '#0000ff50';
+
+    // We need to go through all of this.events and render each rtt's plot point into the canvas.
+    for (var i=this.first_active_event; i<=this.latest_event; i++) {
+      if(i in this.events) {
+        const event = this.events[i];
+        const event_age = now - event['timestamp']
+        if (event_age > this.graph_age) {
+          this.first_active_event++;
+        } else {
+          new_max_rtt = Math.max(new_max_rtt, event['rtt']);
+          this.draw_event(event_age, event['rtt'], prev_max_rtt);
+        }
+      }
+    }
+    this.prev_max_rtt = new_max_rtt;
   }
 }
 
