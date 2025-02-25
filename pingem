@@ -102,6 +102,7 @@ class Graph {
     this.events = {};
     this.latest_event = -1;
     this.graph_age = graph_age;
+    this.newest_timestamp = 0.0;
     this.prev_max_rtt = 0.5;
     this.first_active_event = 0;
     this.data_canvas = document.getElementById('data_canvas_'+row_index+'_'+col_index);
@@ -138,7 +139,7 @@ class Graph {
     let icmp_seq = event['icmp_seq'];
 
     this.latest_event = Math.max(icmp_seq, this.latest_event);
-
+    this.newest_timestamp = Math.max(event['timestamp'], this.newest_timestamp);
 
     //There are a few situations we have to deal with here. First, what happens if the 'expected'
     //packet comes first, then the thing actually arrives? Frankly, this should be a TODO:, to
@@ -182,11 +183,15 @@ class Graph {
 
   draw_event(event_age, rtt, max_rtt) {
     let x = (this.data_canvas.width - this.dot_width) * (1 - event_age/this.graph_age);
-    let y = (this.data_canvas.height) * rtt/max_rtt;
+    let y = (this.data_canvas.height) * (1 - rtt/max_rtt);
 
     this.data_context.beginPath();
-    this.moveTo(x,y-2);
-    this.lineTo(x,y+2);
+    this.data_context.moveTo(x,y-5);
+    this.data_context.lineTo(x,y+5);
+    this.data_context.stroke();
+    this.data_context.beginPath();
+    this.data_context.moveTo(x,y-2);
+    this.data_context.lineTo(x,y+2);
     this.data_context.stroke();
   }
 
@@ -198,27 +203,32 @@ class Graph {
 
     let width = this.data_canvas.width;
     let height = this.data_canvas.height;
-    let now = Date.now();
 
     this.data_context.clearRect(0, 0, width, height);
     this.data_context.globalCompositeOperation='lighter';
     this.data_context.lineWidth = this.dot_width;
-    this.data_context.strokeStyle = '#0000ff50';
+    this.data_context.strokeStyle = '#a0a0ff27';
 
     // We need to go through all of this.events and render each rtt's plot point into the canvas.
     for (var i=this.first_active_event; i<=this.latest_event; i++) {
       if(i in this.events) {
         const event = this.events[i];
-        const event_age = now - event['timestamp']
+        const event_age = this.newest_timestamp - event['timestamp']
         if (event_age > this.graph_age) {
           this.first_active_event++;
         } else {
-          new_max_rtt = Math.max(new_max_rtt, event['rtt']);
-          this.draw_event(event_age, event['rtt'], prev_max_rtt);
+          if(event['msg_type'] == 'pong') {
+            new_max_rtt = Math.max(new_max_rtt, event['rtt']);
+            this.draw_event(event_age, event['rtt'], prev_max_rtt);
+          }
         }
       }
     }
     this.prev_max_rtt = new_max_rtt;
+  }
+
+  get_prev_max_rtt() {
+    return this.prev_max_rtt;
   }
 }
 
@@ -240,7 +250,13 @@ class LayoutManager {
   }
 
   get_prev_max_rtt() {
-    return 0.5; // TODO: THIS IS A PLACEHOLDER! Actually call each graph to get max.
+    var prev_max_rtt = 0.0;
+    for(const [key, [longspan, shortspan]] of Object.entries(this.graphs)) {
+      prev_max_rtt = Math.max(prev_max_rtt, longspan.get_prev_max_rtt());
+      prev_max_rtt = Math.max(prev_max_rtt, shortspan.get_prev_max_rtt());
+    }
+
+    return prev_max_rtt;
   }
 
   get_row_count() {
@@ -439,7 +455,7 @@ class PingManager():
 
     self.interval = 1.0
     if cl_args.interval:
-      self.interval = cl_args.interval
+      self.interval = float(cl_args.interval)
 
     # We use a dict here because we want to be able to delete an entry without
     # the ide of later entries changing:
