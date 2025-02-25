@@ -16,6 +16,8 @@
 #   I'd rather that just be a UI-side thing, but this way, the command-line order
 #   is preserved all the way through to the UI. As I said, I really don't like
 #   it.
+# * Make events a proper type and translate the event dicts to the instances to
+#   save on the hash lookup time.
 
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -65,11 +67,6 @@ row_def = '''
     <canvas id='label_canvas_{y}_1' class='label_canvas'></canvas>
     <canvas id='cursor_canvas_{y}_1' class='cursor_canvas'></canvas>
   </td>
-  <td id='graph_container_{y}_2' class='graph_container'>
-    <canvas id='data_canvas_{y}_2' class='data_canvas'></canvas>
-    <canvas id='label_canvas_{y}_2' class='label_canvas'></canvas>
-    <canvas id='cursor_canvas_{y}_2' class='cursor_canvas'></canvas>
-  </td>
 </tr>
 '''
 
@@ -90,9 +87,14 @@ index = '''
   .label_canvas { z-index:1; }
   .cursor_canvas { z-index:2; }
   .close_button { display:inline-block; }
+  #viewport_tracker {
+    position:fixed; top:0; left:0; width:100vw; height:100vh;
+    overflow:hidden; z-index:-1;
+  }
 </style>
 </head>
 <body>
+<div id=viewport_tracker height:100vh width:100vw></div>
 <table class=display_layout>
   ROWS
 </table>
@@ -113,7 +115,7 @@ class Graph {
     this.cursor_context = this.cursor_canvas.getContext('2d');
     this.graph_container = document.getElementById('graph_container_'+row_index+'_'+col_index);
 
-    this.dot_width = 5;
+    this.dot_width = 9;
   }
 
   set_geometry(width, height) {
@@ -186,12 +188,12 @@ class Graph {
     let y = (this.data_canvas.height) * (1 - rtt/max_rtt);
 
     this.data_context.beginPath();
-    this.data_context.moveTo(x,y-5);
-    this.data_context.lineTo(x,y+5);
+    this.data_context.moveTo(x,y-this.dot_width/1.5);
+    this.data_context.lineTo(x,y+this.dot_width/1.5);
     this.data_context.stroke();
     this.data_context.beginPath();
-    this.data_context.moveTo(x,y-2);
-    this.data_context.lineTo(x,y+2);
+    this.data_context.moveTo(x,y-this.dot_width/2.5);
+    this.data_context.lineTo(x,y+this.dot_width/2.5);
     this.data_context.stroke();
   }
 
@@ -242,8 +244,9 @@ class LayoutManager {
 
     const resizeObserver = new ResizeObserver(entries => {
       layout_manager.on_resize();
+      //TODO: Trigger a redraw of everything that hasn't been drawn in the last 500ms.
     });
-    resizeObserver.observe(document.body);
+    resizeObserver.observe(document.getElementById('viewport_tracker'));
 
     this.width = window.innerWidth;
     this.height = window.innerHeight;
@@ -251,9 +254,8 @@ class LayoutManager {
 
   get_prev_max_rtt() {
     var prev_max_rtt = 0.0;
-    for(const [key, [longspan, shortspan]] of Object.entries(this.graphs)) {
+    for(const [key, [longspan, unused]] of Object.entries(this.graphs)) {
       prev_max_rtt = Math.max(prev_max_rtt, longspan.get_prev_max_rtt());
-      prev_max_rtt = Math.max(prev_max_rtt, shortspan.get_prev_max_rtt());
     }
 
     return prev_max_rtt;
@@ -288,9 +290,8 @@ class LayoutManager {
     console.log('setting geometries to ' + this.data_width + ',' + this.data_height);
     for(var index of Object.keys(this.graphs)) {
       if(this.graphs[index] != undefined) {
-        /* TODO: how to handle the third column? It's not going to be a Graph type. */
-        this.graphs[index][0].set_geometry(this.data_width, this.data_height);
-        this.graphs[index][1].set_geometry(this.data_width, this.data_height);
+        /* TODO: how to handle the second column? It's not going to be a Graph type. */
+        this.graphs[index][0].set_geometry(this.data_width*2, this.data_height);
       }
     }
   }
@@ -302,8 +303,8 @@ class LayoutManager {
 
     if(this.graphs[index] == undefined) {
       this.graphs[index] = [
-          new Graph(60*60, index, 0),
-          new Graph(60*5, index, 1)];
+          new Graph(60*5, index, 0),
+          undefined];
     }
   }
 
@@ -351,7 +352,6 @@ class LayoutManager {
       '[' + this.endpoints[event['index']] + ']  ' + message;
 
     this.graphs[event['index']][0].append(event);
-    this.graphs[event['index']][1].append(event);
   }
 }
 
@@ -434,8 +434,6 @@ let layout_manager = new LayoutManager();
 '''
 
 secret = secrets.randbelow(1000000000000000)
-#TODO: temporarily overridden for debugging
-secret = 1
 print('using secret', secret);
 
 def start_browser():
@@ -621,12 +619,11 @@ class RequestHandler(BaseHTTPRequestHandler):
     else:
       if(not self.check_secret()):
         print('failed to authorize:' + self.path)
-        raise PermissionError('Auth failure. TODO: more info in this message.')
-
-      if(self.parsed_url.path == '/'):
-        self.serve_index()
-      elif(self.parsed_url.path == '/stream/'):
-        self.serve_stream()
+      else:
+        if(self.parsed_url.path == '/'):
+          self.serve_index()
+        elif(self.parsed_url.path == '/stream/'):
+          self.serve_stream()
 
     self.finish()
     self.connection.close()
