@@ -116,6 +116,7 @@ class Graph {
     this.graph_container = document.getElementById('graph_container_'+row_index+'_'+col_index);
 
     this.dot_width = 9;
+    this.vertical_label_divisions = 5.0;
   }
 
   set_geometry(width, height) {
@@ -161,28 +162,6 @@ class Graph {
     this.redraw();
   }
 
-  _redraw() {
-    let width = this.data_canvas.width;
-    let height = this.data_canvas.height;
-
-    this.data_context.globalCompositeOperation='lighter';
-    this.data_context.fillStyle = 'rgb(255,0,0)';
-    this.data_context.fillRect(0, 0, width, height);
-
-    this.label_context.globalCompositeOperation='lighter';
-    this.label_context.fillStyle = 'rgb(0,255,0)';
-    this.label_context.fillRect(10, 10, width-20, height-20);
-
-    this.cursor_context.globalCompositeOperation='lighter';
-    this.cursor_context.fillStyle = 'rgb(0,0,255)';
-    this.cursor_context.fillRect(20, 20, width-40, height-40);
-
-    this.cursor_context.globalCompositeOperation='source-over';
-    this.cursor_context.fillStyle = 'black';
-    this.cursor_context.font='20px Courier';
-    this.cursor_context.fillText(''+width+'x'+height, 25, 25);
-  }
-
   draw_event(event_age, rtt, max_rtt) {
     let x = (this.data_canvas.width - this.dot_width) * (1 - event_age/this.graph_age);
     let y = (this.data_canvas.height) * (1 - rtt/max_rtt);
@@ -226,7 +205,38 @@ class Graph {
         }
       }
     }
+
+    this.draw_labels(prev_max_rtt);
+
     this.prev_max_rtt = new_max_rtt;
+  }
+
+  draw_labels(prev_max_rtt) {
+    let width = this.data_canvas.width;
+    let height = this.data_canvas.height;
+
+    this.label_context.clearRect(0, 0, width, height);
+    this.label_context.lineWidth = 1;
+    this.label_context.strokeStyle= '#ff6060ff';
+    this.label_context.fillStyle= '#ff6060ff';
+    this.data_context.globalCompositeOperation='source-over';
+    this.label_context.beginPath();
+    this.label_context.font = '15px courier new';
+    this.label_context.textBaseline = 'top';
+    var inc = 1.0/this.vertical_label_divisions;
+    for(var k=0.0; k<1.0-(inc/2.0); k+=inc) {
+      var y = Math.floor(k*height);
+      this.label_context.textAlign = 'left';
+      this.label_context.fillText('' + ((1-k)*prev_max_rtt).toFixed(1) + 'ms', 0, y+1);
+      this.label_context.textAlign = 'right';
+      this.label_context.fillText('' + ((1-k)*100).toFixed(1) + '%', width-1, y+1);
+      if(k>0.0) {
+        this.label_context.moveTo(0, y);
+        this.label_context.lineTo(width-1, y);
+      }
+    }
+    this.label_context.stroke();
+
   }
 
   get_prev_max_rtt() {
@@ -303,7 +313,7 @@ class LayoutManager {
 
     if(this.graphs[index] == undefined) {
       this.graphs[index] = [
-          new Graph(60*5, index, 0),
+          new Graph(60*90, index, 0),
           undefined];
     }
   }
@@ -355,64 +365,10 @@ class LayoutManager {
   }
 }
 
-/* DEPRECATED
-//class OverlayManager {
-//  constructor() {
-//    this.canvas = document.getElementById('overlayCanvas');
-//    this.context = this.canvas.getContext('2d');
-//
-//    console.log('OverlayManager.canvas:', this.canvas);
-//    this.canvas.width = window.innerWidth;
-//    this.canvas.height = window.innerHeight;
-//    this.cursor_width = 75;
-//
-//    this.last_cursor_x = 0;
-//    this.last_cursor_width = this.cursor_width;
-//
-//    this.canvas.addEventListener('wheel', (event) => {
-//      event.preventDefault();
-//      this.cursor_width -= event.deltaY/120;
-//      if(this.cursor_width < 1) {
-//        this.cursor_width = 1;
-//      }
-//      this.draw_cursor(this.last_cursor_x);
-//    });
-//
-//    this.canvas.addEventListener('mousemove', (event) => {
-//      this.draw_cursor(event.clientX);
-//    });
-//  }
-//
-//  draw_cursor(x) {
-//    this.context.clearRect(
-//      this.last_cursor_x - this.last_cursor_width/2 - 1, 0,
-//      this.last_cursor_width + 2, this.canvas.height);
-//
-//    this.context.beginPath();
-//    this.context.lineWidth = this.cursor_width
-//    this.context.strokeStyle = '#0000ff80';
-//    this.context.moveTo(x, 0);
-//    this.context.lineTo(x, this.canvas.height-1);
-//    this.context.stroke();
-//
-//    this.context.beginPath();
-//    this.context.lineWidth = 1;
-//    this.context.strokeStyle = 'red';
-//    this.context.moveTo(x, 0);
-//    this.context.lineTo(x, this.canvas.height-1);
-//    this.context.stroke();
-//
-//    this.last_cursor_x = x;
-//    this.last_cursor_width = this.cursor_width;
-//  }
-//}
-*/
-
 /*TODO: this doesn't really need to be a class.*/
 class DataRelay {
   constructor() {
     const stream_url = '/stream/?secret='+SECRET;
-    this.name = 'foo';
     this.event_source = new EventSource(stream_url);
     this.event_source.onmessage = (event) => {
       const json_data=event.data;
@@ -611,6 +567,7 @@ class RequestHandler(BaseHTTPRequestHandler):
     while(True):
       for event in ping_manager.get_events():
         self.wfile.write(event)
+        #TODO: "I/O operation on a closed file" after machine sleeps.
         self.wfile.flush()
 
   def do_GET(self):
