@@ -99,13 +99,116 @@ index = '''
   ROWS
 </table>
 <script type='text/javascript' defer>
+class Epoch {
+  constructor(vertical_divisions, all_graph_max_rtt) {
+    this.buckets = Array(vertical_divisions).fill(0);
+    this.samples = [];
+    this.sorted = true;
+    this.count = 0;
+    this.losses = 0;
+    this.vertical_divisions = vertical_divisions;
+    this.all_graph_max_rtt = all_graph_max_rtt;
+  }
+
+  add(event) {
+    this.count++;
+    if(event['msg_type'] == 'pong') {
+      var bucket = Math.floor(this.buckets.length * event['rtt'] / (this.all_graph_max_rtt + 0.001));
+      bucket = Math.min(bucket, this.vertical_divisions - 1);
+      this.buckets[bucket] += 1;
+      this.samples.push(event['rtt']);
+      this.sorted = false;
+    } else {
+      this.losses++;
+    }
+  }
+
+  get_buckets() {
+    return this.buckets;
+  }
+
+  ensure_samples_sorted() {
+    if(!this.sorted) {
+      this.samples.sort();
+      this.sorted = true;
+    }
+  }
+
+  get_max_displayed_rtt() {
+    this.ensure_samples_sorted();
+    return this.samples[this.samples.length - 1];
+  }
+
+  get_stats() {
+    this.ensure_samples_sorted();
+  }
+}
+
+class View {
+  constructor(events, start_timestamp, end_timestamp, append, num_epochs,
+              vertical_divisions, max_rtt) {
+    this.epochs = [];
+    this.num_epochs = num_epochs;
+    this.rebucket = true;
+    this.timespan = end_timestamp - start_timestamp;
+    this.start_timestamp = start_timestamp;
+    this.end_timestamp = end_timestamp;
+    this.append = true;
+    this.vertical_divisions = vertical_divisions;
+    this.all_graph_max_rtt = max_rtt;
+
+    //TODO: rewrite this to binary search for the first and last icmp_seqs.
+    for(var icmp_seq=0; icmp_seq < events.length; icmp_seq++) {
+      if(events[icmp_seq]) {
+        if(events[icmp_seq]['timestamp'] > start_timestamp &&
+           events[icmp_seq]['timestamp'] < end_timestamp) {
+          this.add(events[icmp_seq]);
+        }
+      }
+    }
+  }
+
+  add(event) {
+    if(event['timestamp'] >= this.end_timestamp) {
+      return;
+    }
+
+    var epoch_id =
+      Math.floor(this.num_epochs * (event['timestamp'] - this.start_timestamp) / this.timespan);
+    if(!this.epochs[epoch_id]) {
+      this.epochs[epoch_id] = new Epoch(this.vertical_divisions, this.all_graph_max_rtt);
+    }
+    this.epochs[epoch_id].add(event);
+  }
+
+  get_buckets(epoch_id) {
+    if(!this.epochs[epoch_id]) {
+      return undefined;
+    }
+    return this.epochs[epoch_id].get_buckets();
+  }
+
+  get_max_displayed_rtt() {
+    var this_graph_max_rtt = 0;
+    //TODO: can this be const, given that the call forces a sort? (This is just a shortcoming of my
+    //      lack of JS experience.
+    for(var epoch of this.epochs) {
+      // There are times (like your machine is sleeping, or JS at breakpoint) that this can happen:
+      if(epoch) {
+        this_graph_max_rtt = Math.max(this_graph_max_rtt, epoch.get_max_displayed_rtt());
+      }
+    }
+
+    return this_graph_max_rtt;
+  }
+}
+
 class Graph {
   constructor(graph_age, row_index, col_index) {
-    this.events = {};
-    this.latest_event = -1;
+    this.events = [];
+    this.prev_max_ttl = 0;
     this.graph_age = graph_age;
     this.newest_timestamp = 0.0;
-    this.prev_max_rtt = 0.5;
     this.first_active_event = 0;
     this.data_canvas = document.getElementById('data_canvas_'+row_index+'_'+col_index);
     this.label_canvas = document.getElementById('label_canvas_'+row_index+'_'+col_index);
@@ -115,7 +218,15 @@ class Graph {
     this.cursor_context = this.cursor_canvas.getContext('2d');
     this.graph_container = document.getElementById('graph_container_'+row_index+'_'+col_index);
 
-    this.dot_width = 9;
+    // I've chosen to have the pixel dimensions attached to individual graphs
+    // instead of to the layout manager because I may choose to have the heights
+    // independently resizeable.
+    this.epoch_pixel_width = 7;
+    this.epoch_pixel_width_center = Math.floor(this.epoch_pixel_width / 2) + 1;
+    this.bucket_pixel_height = 7;
+    this.bucket_pixel_height_center = Math.floor(this.bucket_pixel_height_center / 2) + 1;
+    this.inset_width = 0;
+    this.inset_height = 0;
     this.vertical_label_divisions = 5.0;
   }
 
@@ -130,18 +241,28 @@ class Graph {
       canvas.height = this.height;
     }
 
-    this.graph_container.width = this.width 
+    this.graph_container.width = this.width
       - 5 /* I've no idea why this is necessary */
       ;
-    this.graph_container.height = this.height 
+    this.graph_container.height = this.height
       + 2 /* I've no idea why this is necessary */
       ;
+
+    this.num_epochs = Math.floor(this.graph_container.width / this.epoch_pixel_width);
+    var new_inset_width = this.num_epochs * this.epoch_pixel_width;
+    this.buckets_per_epoch = Math.floor(this.graph_container.height / this.bucket_pixel_height);
+    var new_inset_height = this.buckets_per_epoch * this.bucket_pixel_height;
+
+    this.left_offset = Math.floor((this.graph_container.width - new_inset_width)/2);
+    this.top_offset = Math.floor((this.graph_container.top - new_inset_height)/2);
+
+    if(new_inset_width != this.inset_width || new_inset_height != this.inset_height) {
+      this.rebucket_required = true;
+    }
   }
 
   append(event) {
     let icmp_seq = event['icmp_seq'];
-
-    this.latest_event = Math.max(icmp_seq, this.latest_event);
     this.newest_timestamp = Math.max(event['timestamp'], this.newest_timestamp);
 
     //There are a few situations we have to deal with here. First, what happens if the 'expected'
@@ -162,56 +283,62 @@ class Graph {
     this.redraw();
   }
 
-  draw_event(event_age, rtt, max_rtt) {
-    let x = (this.data_canvas.width - this.dot_width) * (1 - event_age/this.graph_age);
-    let y = (this.data_canvas.height) * (1 - rtt/max_rtt);
-
-    this.data_context.beginPath();
-    this.data_context.moveTo(x,y-this.dot_width/1.5);
-    this.data_context.lineTo(x,y+this.dot_width/1.5);
-    this.data_context.stroke();
-    this.data_context.beginPath();
-    this.data_context.moveTo(x,y-this.dot_width/2.5);
-    this.data_context.lineTo(x,y+this.dot_width/2.5);
-    this.data_context.stroke();
+  force_rebucket() {
+    self.rebucket_required = true;
   }
 
   redraw() {
     // vvvvvvvvv DO NOT CHANGE THE ORDER vvvvvvvvv
-    let prev_max_rtt = layout_manager.get_prev_max_rtt();
-    let new_max_rtt = 0.0;
+    const max_rtt = layout_manager.get_max_displayed_rtt();
     // ^^^^^^^^^ DO NOT CHANGE THE ORDER ^^^^^^^^^
+
+    if(max_rtt != this.prev_max_rtt) {
+      this.force_rebucket();
+    }
+    this.prev_max_rtt = max_rtt;
+
+    if(this.rebucket_required) {
+      const [start_timestamp, end_timestamp, append] = layout_manager.get_zoom();
+      this.view = new View(this.events, start_timestamp, end_timestamp, append,
+                           this.num_epochs, this.buckets_per_epoch, max_rtt);
+      //TODO: bring this back!!!
+      //this.rebucket_required = false;
+    }
 
     let width = this.data_canvas.width;
     let height = this.data_canvas.height;
 
-    this.data_context.clearRect(0, 0, width, height);
-    this.data_context.globalCompositeOperation='lighter';
-    this.data_context.lineWidth = this.dot_width;
-    this.data_context.strokeStyle = '#a0a0ff27';
+    this.data_context.clearRect(0, 0, width, height); // TODO: not really necessary?
+    this.data_context.globalCompositeOperation='source_over';
+    this.data_context.lineWidth = this.epoch_pixel_width;
 
-    // We need to go through all of this.events and render each rtt's plot point into the canvas.
-    for (var i=this.first_active_event; i<=this.latest_event; i++) {
-      if(i in this.events) {
-        const event = this.events[i];
-        const event_age = this.newest_timestamp - event['timestamp']
-        if (event_age > this.graph_age) {
-          this.first_active_event++;
-        } else {
-          if(event['msg_type'] == 'pong') {
-            new_max_rtt = Math.max(new_max_rtt, event['rtt']);
-            this.draw_event(event_age, event['rtt'], prev_max_rtt);
+    for(var epoch_id=0; epoch_id<this.num_epochs; epoch_id++) {
+      const buckets = this.view.get_buckets(epoch_id);
+      if(buckets != undefined) {
+        var x =
+            this.left_offset + (epoch_id * this.epoch_pixel_width) + this.epoch_pixel_width_center;
+        var y0 = 0;
+        var y1 = this.bucket_pixel_height;
+        this.data_context.moveTo(x, 0);
+        for(var bucket_id=buckets.length-1; bucket_id >= 0; bucket_id--) {
+          if(buckets[bucket_id]) {
+            this.data_context.beginPath();
+            this.data_context.strokeStyle =
+              ['#ffffff', '#ff0000','#00ff00', '#0000ff', '#800080'][Math.floor(Math.random() * 5)];
+            this.data_context.moveTo(x, y0);
+            this.data_context.lineTo(x, y1);
+            this.data_context.stroke();
           }
+          y0 += this.bucket_pixel_height;
+          y1 += this.bucket_pixel_height;
         }
       }
     }
 
-    this.draw_labels(prev_max_rtt);
-
-    this.prev_max_rtt = new_max_rtt;
+    this.draw_labels(max_rtt);
   }
 
-  draw_labels(prev_max_rtt) {
+  draw_labels(max_rtt) {
     let width = this.data_canvas.width;
     let height = this.data_canvas.height;
 
@@ -227,7 +354,7 @@ class Graph {
     for(var k=0.0; k<1.0-(inc/2.0); k+=inc) {
       var y = Math.floor(k*height);
       this.label_context.textAlign = 'left';
-      this.label_context.fillText('' + ((1-k)*prev_max_rtt).toFixed(1) + 'ms', 0, y+1);
+      this.label_context.fillText('' + ((1-k)*max_rtt).toFixed(1) + 'ms', 0, y+1);
       this.label_context.textAlign = 'right';
       this.label_context.fillText('' + ((1-k)*100).toFixed(1) + '%', width-1, y+1);
       if(k>0.0) {
@@ -239,13 +366,18 @@ class Graph {
 
   }
 
-  get_prev_max_rtt() {
-    return this.prev_max_rtt;
+  get_max_displayed_rtt() {
+    if(!this.view) {
+      return 0;
+    } else {
+      return this.view.get_max_displayed_rtt();
+    }
   }
 }
 
 class LayoutManager {
   constructor() {
+    // TODO: get off the hashes
     // Just a map of row index to the command-line endpoint name:
     this.endpoints = {}
 
@@ -260,15 +392,37 @@ class LayoutManager {
 
     this.width = window.innerWidth;
     this.height = window.innerHeight;
+
+    this.start_timestamp = 0;
+    this.end_timestamp = 60*5;
+    this.appending = true;
   }
 
-  get_prev_max_rtt() {
-    var prev_max_rtt = 0.0;
+  set_zoom(start_timestamp, end_timestamp, appending) {
+    this.start_timestamp = start_timestamp;
+    this.end_timestamp = end_timestamp;
+    this.appending = appending;
+
+    this.force_rebucket();
+  }
+
+  force_rebucket() {
+    for(const [graph_index, graph] of Object.entries(this.graphs)) {
+      graph[0].force_rebucket();
+    }
+  }
+
+  get_zoom() {
+    return [this.start_timestamp, this.end_timestamp, this.appending];
+  }
+
+  get_max_displayed_rtt() {
+    var max_rtt = 0.0;
     for(const [key, [longspan, unused]] of Object.entries(this.graphs)) {
-      prev_max_rtt = Math.max(prev_max_rtt, longspan.get_prev_max_rtt());
+      max_rtt = Math.max(max_rtt, longspan.get_max_displayed_rtt());
     }
 
-    return prev_max_rtt;
+    return max_rtt;
   }
 
   get_row_count() {
@@ -304,6 +458,8 @@ class LayoutManager {
         this.graphs[index][0].set_geometry(this.data_width*2, this.data_height);
       }
     }
+
+    this.force_rebucket();
   }
 
   activate_row(index) {
@@ -313,7 +469,7 @@ class LayoutManager {
 
     if(this.graphs[index] == undefined) {
       this.graphs[index] = [
-          new Graph(60*90, index, 0),
+          new Graph(60*5, index, 0),
           undefined];
     }
   }
