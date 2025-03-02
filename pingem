@@ -12,8 +12,13 @@
 # * UI zoom: Shouldn't be too hard.
 # * Allow forcible resize of the columns.
 # * Get the canvasas properly sized to their containers. The heuristic sucks ass.
+# * Unless there's been a rebucketing, ONLY redraw the current epoch.
+# * Smooth the transition between max_ttls when dropping one off the left side.
+#   Basically, just smooth the 'animation' a bit? Pretty hard for low framerates.
+#   Could redraw() be called every 100ms for a couple seconds?
 
 #TODO, minor:
+# * use icmp_seq * interval + rtt as timestamp for pongs?
 # * WHAT IS CAUSING THE FALSE LOSS ABOUT 1S AFTER STARTUP?
 # * Make events a proper type and translate the event dicts to the instances to
 #   save on the hash lookup time.
@@ -30,16 +35,18 @@
 #   it.  (Am I still doing this? 2/27/2025)
 # * If one graph bumps over because it's appending, force an immediate redraw on
 #   them all so they stay in vertical sync.
+# * Add support for the zoom to just continuously show everything? Meh. Maybe.
 
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
+import os
 import re
 import secrets
 import select
 import shutil
-from subprocess import Popen, PIPE
+import subprocess
 from threading import Thread
 import time
 from urllib.parse import urlparse, parse_qs
@@ -49,7 +56,7 @@ MAX_ENDPOINTS = 5
 
 parser = argparse.ArgumentParser(
   description='pingem [-i interval] endpoint [endpoint [endpoint...]]')
-parser.add_argument('-i', '--interval', help='time (as a float) between pings')
+parser.add_argument('-i', '--interval', type=float, default=0.2, help='time (as a float) between pings')
 parser.add_argument('endpoints', nargs='*',
                     help='IP name or address of target[s]',
                     default=['8.8.8.8'])
@@ -111,6 +118,9 @@ index = '''
   ROWS
 </table>
 <script type='text/javascript' defer>
+var beep_sound = new Audio('https://cdn.pixabay.com/audio/2022/03/10/audio_c07a9f33fd.mp3');
+var already_beeped = false;
+
 class Epoch {
   constructor(vertical_divisions, all_graph_max_rtt) {
     this.buckets = Array(vertical_divisions).fill(0);
@@ -128,11 +138,11 @@ class Epoch {
     this.count_all++;
     if(event['msg_type'] == 'pong') {
       this.count_pong++;
-      layout_manager.update_largest_known_bucket_count(this.count_pong);
       this.total_rtt += event['rtt'];
-      var bucket = Math.floor(this.buckets.length * event['rtt'] / (this.all_graph_max_rtt + 0.001));
-      bucket = Math.min(bucket, this.vertical_divisions - 1);
-      this.buckets[bucket] += 1;
+      var bucket_id = Math.floor(this.buckets.length * event['rtt'] / (this.all_graph_max_rtt + 0.001));
+      bucket_id = Math.min(bucket_id, this.vertical_divisions - 1);
+      this.buckets[bucket_id]++;
+      layout_manager.update_largest_known_bucket_count(this.buckets[bucket_id]);
       this.samples.push(event['rtt']);
       this.sorted = false;
     } else {
@@ -153,7 +163,9 @@ class Epoch {
 
   get_max_displayed_rtt() {
     this.ensure_samples_sorted();
-
+    if(this.samples.length == 0) {
+      return undefined;
+    }
     return this.samples[this.samples.length - 1];
   }
 
@@ -254,7 +266,11 @@ class View {
     for(var epoch of this.epochs) {
       // There are times (like your machine is sleeping, or JS at breakpoint) that this can happen:
       if(epoch) {
-        this_graph_max_rtt = Math.max(this_graph_max_rtt, epoch.get_max_displayed_rtt());
+        const epoch_max_displayed_rtt = epoch.get_max_displayed_rtt();
+        if(epoch_max_displayed_rtt != undefined) {
+          //This catches a rare case where the most recent epoch has only a losses in it.
+          this_graph_max_rtt = Math.max(this_graph_max_rtt, epoch_max_displayed_rtt);
+        }
       }
     }
 
@@ -337,7 +353,9 @@ class Graph {
     // receiving the (very late) pong from the echo endpoint. In this case, it's timed out ands
     // dropped.
     if(this.events[icmp_seq]) {
-      //TODO: later, make the behavior configurable?
+      //There are two ways for this to happen. Either the packet arrived after our timeout limit,
+      //or the backend reported an 'expected' event after it had already delivered us a 'pong.'
+      //Either way, it would be weird.
     } else {
       this.events[icmp_seq] = event;
 
@@ -364,6 +382,7 @@ class Graph {
 
   rebucket_if_necessary() {
     if(this.rebucket_required || !this.view) {
+      console.log('Graph is rebucketing...');
       const max_rtt = layout_manager.get_max_displayed_rtt();
       const [start_timestamp, end_timestamp, append] = layout_manager.get_zoom();
       this.view = new View(this.events, start_timestamp, end_timestamp, append,
@@ -375,6 +394,7 @@ class Graph {
   }
 
   redraw() {
+    console.log('redraw()');
     const max_rtt = layout_manager.get_max_displayed_rtt();
     if(max_rtt != this.prev_max_rtt) {
       this.schedule_rebucket();
@@ -382,6 +402,7 @@ class Graph {
     this.prev_max_rtt = max_rtt;
 
     this.rebucket_if_necessary();
+    console.log('redraw(), post-rebucketing');
 
     const largest_known_bucket_count = layout_manager.get_largest_known_bucket_count();
 
@@ -394,8 +415,6 @@ class Graph {
     for(var epoch_id=0; epoch_id<this.num_displayed_epochs; epoch_id++) {
       const buckets = this.view.get_buckets(epoch_id);
       if(buckets != undefined) {
-
-
         var x =
             this.left_offset + (epoch_id * this.epoch_pixel_width) + this.epoch_pixel_width_center;
         var y0 = 0;
@@ -403,21 +422,32 @@ class Graph {
         this.data_context.moveTo(x, 0);
         for(var bucket_id=buckets.length-1; bucket_id >= 0; bucket_id--) {
           if(buckets[bucket_id]) {
-            var intensity = Math.min(1.0, buckets[bucket_id] / largest_known_bucket_count);
-            intensity = intensity * 0.75 + 0.25;
+            var intensity = Math.min(1.0, (buckets[bucket_id]-1) / (largest_known_bucket_count-1));
+            intensity = intensity * 0.70 + 0.30;
             var blue = intensity * 255.0;
             var red_green = intensity * blue;
 
-            this.draw_line(x, y0, x, y1, this.epoch_pixel_width,
-                      `rgb(${red_green},${red_green},${blue})`);
+            var color = `rgb(${red_green},${red_green},${blue})`;
+            if(buckets[bucket_id] == largest_known_bucket_count) {
+              color = `rgb(255,0,0)`;
+            }
+            this.draw_line(x, y0, x, y1, this.epoch_pixel_width, color);
           }
           y0 += this.bucket_pixel_height;
           y1 += this.bucket_pixel_height;
         }
 
         const stats = this.view.get_stats(epoch_id);
+        if(!stats) {
+          debugger;
+        }
         const [loss, avg, _100, _90, _50, _10, _0] = stats;
         if(loss) {
+          if(loss > 0.9) {
+            // This is only here to help debug the issue with losses getting ahead of arrivals.
+            beep_sound.play();
+            // debugger;
+          }
           var loss_y0 = this.inset_height + this.top_offset; // TODO: -1?
           var loss_y1 = loss_y0 - loss * this.inset_height;
           this.draw_line(x, loss_y0, x, loss_y1, 1, '#40a040');
@@ -483,7 +513,7 @@ class LayoutManager {
     this.width = window.innerWidth;
     this.height = window.innerHeight;
 
-    this.set_zoom(0, 60*3, true);
+    this.set_zoom(0, 60*5, true);
   }
 
   set_zoom(start_timestamp, end_timestamp, appending) {
@@ -673,56 +703,79 @@ def encode_as_wire_message(data):
   json_encoded = json.dumps(data)
   return bytes('data: ' + json_encoded + '\n\n', 'utf8')
 
-class PingManager():
-  def __init__(self, endpoint_names):
-    self.successful_response_regex = re.compile(
-      r'from ([^:]*):.*seq=(\d*) ttl=(\d*) time=([0-9.]*) ms')
+class Endpoint():
+  successful_response_regex = re.compile(
+    r'from ([^:]*):.*seq=(\d*) ttl=(\d*) time=([0-9.]*) ms')
 
-    self.interval = 1.0
-    if cl_args.interval:
-      self.interval = float(cl_args.interval)
+  def __init__(self, endpoint_name, endpoint_index, interval):
+    self.endpoint_name = endpoint_name
+    self.endpoint_index = endpoint_index
+    self.start_time = time.time()
+    self.reported = {}
+    self.oldest_reported = 0
 
-    # We use a dict here because we want to be able to delete an entry without
-    # the ide of later entries changing:
-    self.endpoints = {}
-    for endpoint_name in endpoint_names:
-      self.add_endpoint(endpoint_name)
+    self.subproc = subprocess.Popen(
+      [ping, '-i', str(cl_args.interval), self.endpoint_name],
+      stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
+  #TODO: gets only one. Any way to do better without re-calling select?
+  def get_pong(self):
+    line = self.subproc.stdout.readline().decode().strip()
 
-  def add_endpoint(self, endpoint_name):
-    #TODO: at startup, work out the location of ping binary
-    endpoint_index = None
-    for index in range(MAX_ENDPOINTS):
-      if index not in self.endpoints:
-        endpoint_index = index
-        break
+    #TODO: detect 'Name or service not known' and deliver an error to the user?
+    if 'bytes of data' in line:
+      return None
+    else:
+      match = re.search(self.successful_response_regex, line)
+      if not match:
+        print(f'NONMATCHING LINE {self.endpoint_name}:', line)
+      else:
+        icmp_seq = self.get_wide_icmp_seq(int(match.group(2)))
+        if not self.needs_reporting(icmp_seq):
+          print(f'ICMP_SEQ {icmp_seq} already reported')
+        else:
+          data = {
+            'icmp_seq':  icmp_seq,
+            'msg_type':  'pong',
+            'responder': match.group(1),
+            'ttl':       int(match.group(3)),
+            'rtt':       float(match.group(4)),
+            'raw':       line,
+            'index':     self.endpoint_index,
+            'timestamp': time.time() - self.start_time
+          }
+          print(self.endpoint_name, icmp_seq, data['timestamp'], line)
 
-    if endpoint_index is None:
-      raise "Too many endpoints requested"
+          return encode_as_wire_message(data)
 
-    print('ENDPOINT BEING ADDED: ' + endpoint_name)
-    self.endpoints[endpoint_index] = {'endpoint_name': endpoint_name}
-    self.endpoints[endpoint_index]['subprocess'] = (
-      Popen([ping, '-i', str(self.interval), endpoint_name], stderr=PIPE, stdout=PIPE))
+  def get_losses(self):
+    losses = []
+
+    elapsed_time = time.time() - self.start_time
+    icmp_seq = self.oldest_reported + 1
+
+    #TODO: make user configurable?
+    timeout_time = 3.0
+
+    while icmp_seq * cl_args.interval < elapsed_time - timeout_time:
+      if self.needs_reporting(icmp_seq):
+        data = {
+          'msg_type':  'expected',
+          'icmp_seq':  icmp_seq,
+          'index':     self.endpoint_index,
+          'timestamp': icmp_seq * cl_args.interval
+        }
+        losses.append(encode_as_wire_message(data))
+        print('lost:', data)
+      icmp_seq += 1
+
+    return losses
+
+  def get_wide_icmp_seq(self, narrow):
     now = time.time()
-    self.endpoints[endpoint_index]['start_time'] = time.time();
-    self.endpoints[endpoint_index]['last_loss_check_time'] = now
-
-  #TODO: Revisit this. Currently, the overpacking of responses in the first epoch
-  #      is being handled with a bit of a kludge, by not using the count of pongs
-  #      in the 0th epoch in the determination of the maximum # of pongs in an
-  #      epoch. (The problem is that, during startup, a lot of pongs are queued
-  #      and processed all at once, putting them all in one epoch.)
-  def get_endpoint_start_time(self, endpoint_index):
-    if self.endpoints[endpoint_index]['start_time'] is None:
-      self.endpoints[endpoint_index]['start_time'] = time.time()
-    return self.endpoints[endpoint_index]['start_time']
-
-  def get_wide_icmp_seq(self, narrow, endpoint_index):
-    now = time.time()
-    elapsed = now - self.get_endpoint_start_time(endpoint_index)
+    elapsed = now - self.start_time
     #Compute how many 65k runs we should expect to have completed:
-    runs = elapsed/(65536.0 * self.interval)
+    runs = elapsed/(65536.0 * cl_args.interval)
     runs_fract, runs_floor = math.modf(runs)
     runs_floor = int(runs_floor)
 
@@ -733,59 +786,66 @@ class PingManager():
     else:
       return narrow + 65536 * runs_floor
 
-  def get_expected_events(self, endpoint_index):
-    events = []
+  # returns True if this icmp_seq has never been reported before, False otherwise
+  def needs_reporting(self, icmp_seq):
+    # delete all the records of reported packets that we don't need anymore.
+    while self.oldest_reported in self.reported:
+      del(self.reported[self.oldest_reported])
+      self.oldest_reported += 1
 
-    last_time = self.endpoints[endpoint_index]['last_loss_check_time']
-    now = time.time()
-    time_to_check = now
-    while time_to_check > last_time:
-      elapsed_time = time_to_check - self.get_endpoint_start_time(endpoint_index)
+    if icmp_seq <= self.oldest_reported or icmp_seq in self.reported:
+      return False
 
-      #TODO: Make the timeout time user-configurable.
-      icmp_seq = int((elapsed_time - 3.0)/self.interval)
-      if (icmp_seq >= 0):
-        data = {'msg_type':'expected'}
-        data['icmp_seq'] = icmp_seq
-        data['index'] = endpoint_index
-        data['timestamp'] = time.time() - self.get_endpoint_start_time(endpoint_index)
-        events.append(encode_as_wire_message(data))
+    self.reported[icmp_seq] = True
 
-      time_to_check -= self.interval
+    return True
 
-    self.endpoints[endpoint_index]['last_loss_check_time'] = now
+class PingManager():
+  def __init__(self, endpoint_names):
+    self.interval = cl_args.interval
 
-    return events
+    # We use a dict here because we want to be able to delete an entry without
+    # the ide of later entries changing:
+    self.endpoints = {}
+    for endpoint_name in endpoint_names:
+      self.add_endpoint(endpoint_name)
+
+  def add_endpoint(self, endpoint_name):
+    endpoint_index = None
+    for index in range(MAX_ENDPOINTS):
+      if index not in self.endpoints:
+        endpoint_index = index
+        break
+
+    if endpoint_index is None:
+      raise "Too many endpoints requested"
+
+    print('ENDPOINT BEING ADDED: ' + endpoint_name)
+    self.endpoints[endpoint_index] = Endpoint(endpoint_name, endpoint_index, cl_args.interval)
 
   def get_events(self):
     events = []
-    for endpoint_index, endpoint_data in self.endpoints.items():
-      events += self.get_expected_events(endpoint_index)
+    fds = []
+    fds_to_endpoints = {}
 
-      stdouts = [endpoint_data['subprocess'].stdout]
+    for endpoint_index, endpoint in self.endpoints.items():
+      fds.append(endpoint.subproc.stdout)
+      fds_to_endpoints[endpoint.subproc.stdout] = endpoint
 
-      readable_stdouts, _, _ = select.select(stdouts, [], [])
-      for stdout in readable_stdouts:
-        line = stdout.readline().decode().strip()
-        match = re.search(self.successful_response_regex, line)
-        if match:
-          data = {}
-          data['msg_type'] = 'pong'
-          data['responder'] = match.group(1)
-          icmp_seq = self.get_wide_icmp_seq(int(match.group(2)), endpoint_index)
-          data['icmp_seq'] = icmp_seq
-          data['ttl'] = int(match.group(3))
-          data['rtt'] = float(match.group(4))
-          data['raw'] = line
-          data['index'] = endpoint_index
-          data['timestamp'] = time.time() - self.get_endpoint_start_time(endpoint_index)
-          print(self.endpoints[endpoint_index]['endpoint_name'], icmp_seq, data['timestamp'], line)
-          events.append(encode_as_wire_message(data))
+    ready_fds, _, _ = select.select(fds, [], [], 0.1)
+
+    for fd in ready_fds:
+      pong = fds_to_endpoints[fd].get_pong()
+      if pong:
+        events.append(pong)
+
+    for endpoint_index, endpoint in self.endpoints.items():
+      events += endpoint.get_losses()
 
     return events
 
   def get_endpoint_names(self):
-    return {k:v['endpoint_name'] for k,v in self.endpoints.items()}
+    return {k:v.endpoint_name for k,v in self.endpoints.items()}
 
 #TODO: Get this constant in the class
 class RequestHandler(BaseHTTPRequestHandler):
@@ -855,15 +915,15 @@ class RequestHandler(BaseHTTPRequestHandler):
       self.send_error(404, "Resource not found")
     else:
       if(not self.check_secret()):
-        print('failed to authorize:' + self.path)
+        #print('failed to authorize:' + self.path)
+        pass
       else:
         if(self.parsed_url.path == '/'):
           self.serve_index()
+          self.finish()
         elif(self.parsed_url.path == '/stream/'):
           self.serve_stream()
-
-    self.finish()
-    self.connection.close()
+      self.connection.close()
 
 def run(server_class=ThreadingHTTPServer, handler_class=RequestHandler):
   #TODO: allow the port number to be dynamically assigned.
