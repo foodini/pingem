@@ -18,6 +18,8 @@
 #   Could redraw() be called every 100ms for a couple seconds?
 
 #TODO, minor:
+# * be sure you're not getting a timestamp in JS and doing math on timestamps that
+#   have been sent to you by the python side.
 # * use icmp_seq * interval + rtt as timestamp for pongs?
 # * WHAT IS CAUSING THE FALSE LOSS ABOUT 1S AFTER STARTUP?
 # * Make events a proper type and translate the event dicts to the instances to
@@ -46,6 +48,7 @@ import re
 import secrets
 import select
 import shutil
+import socket
 import subprocess
 from threading import Thread
 import time
@@ -55,8 +58,12 @@ import webbrowser
 MAX_ENDPOINTS = 5
 
 parser = argparse.ArgumentParser(
-  description='pingem [-i interval] endpoint [endpoint [endpoint...]]')
-parser.add_argument('-i', '--interval', type=float, default=0.2, help='time (as a float) between pings')
+  description='pingem [-i interval] [-s packetsize] endpoint [endpoint [endpoint...]]')
+parser.add_argument('-i', '--interval', type=float, default=0.2,
+                    help='Time (as a float) between pings. Default=0.2')
+#TODO: compute the min at global level so it can be included properly in the helptext.
+parser.add_argument('-s', '--size', type=int, default=64,
+                    help='Minimum size of icmp packets. Default=64. Min~=34')
 parser.add_argument('endpoints', nargs='*',
                     help='IP name or address of target[s]',
                     default=['8.8.8.8'])
@@ -474,7 +481,7 @@ class Graph {
     for(var k=0.0; k<1.0-(inc/2.0); k+=inc) {
       var y = Math.floor(k*height);
       this.label_context.textAlign = 'left';
-      this.label_context.fillText('' + ((1-k)*max_rtt).toFixed(1) + 'ms', 0, y+1);
+      this.label_context.fillText('' + ((1-k)*max_rtt*1000).toFixed(1) + 'ms', 0, y+1);
       this.label_context.textAlign = 'right';
       this.label_context.fillText('' + ((1-k)*100).toFixed(1) + '%', width-1, y+1);
       if(k>0.0) {
@@ -693,6 +700,8 @@ let layout_manager = new LayoutManager();
 secret = secrets.randbelow(1000000000000000)
 print('using secret', secret)
 
+SOCKET_PATH = '/tmp/user_icmp_socket'
+
 def start_browser():
   # give the server a moment to start up. I've never seen this to be necessary,
   # but you never know.
@@ -704,70 +713,117 @@ def encode_as_wire_message(data):
   return bytes('data: ' + json_encoded + '\n\n', 'utf8')
 
 class Endpoint():
-  successful_response_regex = re.compile(
-    r'from ([^:]*):.*seq=(\d*) ttl=(\d*) time=([0-9.]*) ms')
-
   def __init__(self, endpoint_name, endpoint_index, interval):
     self.endpoint_name = endpoint_name
     self.endpoint_index = endpoint_index
     self.start_time = time.time()
-    self.reported = {}
-    self.oldest_reported = 0
+    self.oldest_unresolved_icmp_seq = 1
+    self.packet_states = {}
 
-    self.subproc = subprocess.Popen(
-      [ping, '-i', str(cl_args.interval), self.endpoint_name],
-      stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    #TODO: provide feedback to the user when socket isn't available.
+    self.socket.settimeout(0.0)
+    self.socket.connect(SOCKET_PATH)
+    #TODO: make ping size user-configurable
+    self.socket.sendall(f'P {self.endpoint_name} {interval} {cl_args.size}'.encode())
+
+    self.input_buffer = ''
+    self.buffered_events = []
+
+  def get_next_event_from_socket(self):
+    while not self.buffered_events and '\n' not in self.input_buffer:
+      try:
+        bytes_received = self.socket.recv(2048)
+        #TODO: detect event where server goes away and handle gracefully. (inform user.)
+        if len(bytes_received) > 0:
+          self.input_buffer += bytes_received.decode()
+      except TimeoutError as to:
+        return None
+      except BlockingIOError:
+        #This is the exception you'll usually get on timeout. Odd choice for them, but whatever.
+        return None
+
+    events = self.input_buffer.split('\n')
+    if events[-1] == '':
+      self.input_buffer = events.pop()
+
+    self.buffered_events += events
+
+    if self.buffered_events:
+      return self.buffered_events.pop(0)
+    else:
+      return None
 
   #TODO: gets only one. Any way to do better without re-calling select?
-  def get_pong(self):
-    line = self.subproc.stdout.readline().decode().strip()
+  def get_events(self):
+    events = []
 
-    #TODO: detect 'Name or service not known' and deliver an error to the user?
-    if 'bytes of data' in line:
-      return None
-    else:
-      match = re.search(self.successful_response_regex, line)
-      if not match:
-        print(f'NONMATCHING LINE {self.endpoint_name}:', line)
+    while True:
+      line = self.get_next_event_from_socket()
+
+      if not line:
+        return events
+
+      if line[0] == 'S':
+        _cmd, _channel, icmp_seq, timestamp = line.split()
+        icmp_seq = int(icmp_seq)
+        timestamp = float(timestamp)
+        self.packet_states[icmp_seq] = ('S', timestamp)
+      elif line[0] == 'R':
+        _cmd, _channel, icmp_seq, timestamp, rtt, responder, ttl = line.split()
+        icmp_seq = int(icmp_seq)
+        timestamp = float(timestamp)
+        rtt = float(rtt)
+        ttl = int(ttl)
+        self.packet_states[icmp_seq] = ('R', timestamp)
+
+        data = {
+          'icmp_seq':  icmp_seq,
+          'msg_type':  'pong',
+          'ttl':       ttl,
+          'rtt':       rtt,
+          'raw':       line,
+          'index':     self.endpoint_index,
+          'timestamp': timestamp - self.start_time
+        }
+        print(self.endpoint_name, icmp_seq, data['timestamp'], line)
+
+        self.most_recent_arrival_icmp_seq = icmp_seq
+        self.most_recent_arrival_timestamp = data['timestamp']
+
+        events.append(encode_as_wire_message(data))
+      elif line[0] == 'E':
+        #TODO: User feedback?
+        pass
       else:
-        icmp_seq = self.get_wide_icmp_seq(int(match.group(2)))
-        if not self.needs_reporting(icmp_seq):
-          print(f'ICMP_SEQ {icmp_seq} already reported')
-        else:
-          data = {
-            'icmp_seq':  icmp_seq,
-            'msg_type':  'pong',
-            'responder': match.group(1),
-            'ttl':       int(match.group(3)),
-            'rtt':       float(match.group(4)),
-            'raw':       line,
-            'index':     self.endpoint_index,
-            'timestamp': time.time() - self.start_time
-          }
-          print(self.endpoint_name, icmp_seq, data['timestamp'], line)
-
-          return encode_as_wire_message(data)
+        print(f'NONMATCHING LINE {self.endpoint_name}:', line)
 
   def get_losses(self):
     losses = []
 
-    elapsed_time = time.time() - self.start_time
-    icmp_seq = self.oldest_reported + 1
-
     #TODO: make user configurable?
     timeout_time = 3.0
 
-    while icmp_seq * cl_args.interval < elapsed_time - timeout_time:
-      if self.needs_reporting(icmp_seq):
+    now = time.time()
+    resolved_icmp_seqs = []
+    while self.oldest_unresolved_icmp_seq in self.packet_states:
+      if self.packet_states[self.oldest_unresolved_icmp_seq][0] == 'R':
+        resolved_icmp_seqs.append(self.oldest_unresolved_icmp_seq)
+      elif self.packet_states[self.oldest_unresolved_icmp_seq][1] < now - timeout_time:
+        resolved_icmp_seqs.append(self.oldest_unresolved_icmp_seq)
         data = {
           'msg_type':  'expected',
-          'icmp_seq':  icmp_seq,
+          'icmp_seq':  self.oldest_unresolved_icmp_seq,
           'index':     self.endpoint_index,
-          'timestamp': icmp_seq * cl_args.interval
+          'timestamp': self.oldest_unresolved_icmp_seq * cl_args.interval
         }
         losses.append(encode_as_wire_message(data))
         print('lost:', data)
-      icmp_seq += 1
+      else:
+        # the oldest packet hasn't been received, nor has it timed out. We'll check it again later.
+        break
+
+      self.oldest_unresolved_icmp_seq += 1
 
     return losses
 
@@ -786,19 +842,21 @@ class Endpoint():
     else:
       return narrow + 65536 * runs_floor
 
+'''
   # returns True if this icmp_seq has never been reported before, False otherwise
   def needs_reporting(self, icmp_seq):
-    # delete all the records of reported packets that we don't need anymore.
-    while self.oldest_reported in self.reported:
-      del(self.reported[self.oldest_reported])
-      self.oldest_reported += 1
-
-    if icmp_seq <= self.oldest_reported or icmp_seq in self.reported:
+    if icmp_seq < self.all_reported_before or icmp_seq in self.reported:
       return False
 
     self.reported[icmp_seq] = True
 
+    # delete all the records of reported packets that we don't need anymore.
+    while (self.all_reported_before) in self.reported:
+      del(self.reported[self.all_reported_before])
+      self.all_reported_before += 1
+
     return True
+'''
 
 class PingManager():
   def __init__(self, endpoint_names):
@@ -824,25 +882,25 @@ class PingManager():
     self.endpoints[endpoint_index] = Endpoint(endpoint_name, endpoint_index, cl_args.interval)
 
   def get_events(self):
-    events = []
+    all_events = []
     fds = []
     fds_to_endpoints = {}
 
     for endpoint_index, endpoint in self.endpoints.items():
-      fds.append(endpoint.subproc.stdout)
-      fds_to_endpoints[endpoint.subproc.stdout] = endpoint
+      fds.append(endpoint.socket)
+      fds_to_endpoints[endpoint.socket] = endpoint
 
     ready_fds, _, _ = select.select(fds, [], [], 0.1)
 
     for fd in ready_fds:
-      pong = fds_to_endpoints[fd].get_pong()
-      if pong:
-        events.append(pong)
+      events = fds_to_endpoints[fd].get_events()
+      if events:
+        all_events += events
 
     for endpoint_index, endpoint in self.endpoints.items():
-      events += endpoint.get_losses()
+      all_events += endpoint.get_losses()
 
-    return events
+    return all_events
 
   def get_endpoint_names(self):
     return {k:v.endpoint_name for k,v in self.endpoints.items()}
