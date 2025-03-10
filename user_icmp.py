@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 # TODO:
+# * fileno isn't quite enough to ID a packet. What if there are two instances
+#   of user_icmp running at the same time? Each could have a caller on fileno=5
+#   and the two instance would confuse the other's responses as their own.
 # * Should I stop sending fileno over the network? Writting a mapper just adds
 #   more code that has to run in privileged mode.
 # * need to consider defense against abusers. I have a brief delay before
@@ -13,6 +16,8 @@
 # * SHould it be left to the user to determine RTT? If so, I can save 8 bytes.
 # * need to chroot jail the process
 # * handle Destination Net Unreachable.
+# * If a packet arrives after it has been reported as lost, don't record it in
+# * the oldest_reported hash. The entry will just leak there.
 
 from collections import defaultdict
 import os
@@ -187,7 +192,7 @@ class QueueManager():
     while True:
       pong = self.socket_manager.tick(1)
       if pong:
-        # For some reason, tick is occasionally rejecting 
+        # For some reason, tick is occasionally rejecting
         self.events[pong.fileno].put(pong)
 
   def sender(self):
