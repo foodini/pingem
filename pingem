@@ -6,18 +6,28 @@
 # it breeds a frustration with the entire topic. If you have a problem with the
 # way it looks, feel free to express your ideas in the form of a pull request.
 
-#TODO, major:
+#TODO, High Priority:
 # * Stats: Get the percentiles/means charted. Figure out what the overview pane
 # *        is going to look like and how it'll work.
 # * UI zoom: Shouldn't be too hard.
 # * Allow forcible resize of the columns.
 # * Get the canvasas properly sized to their containers. The heuristic sucks ass.
-# * Unless there's been a rebucketing, ONLY redraw the current epoch.
 # * Smooth the transition between max_ttls when dropping one off the left side.
 #   Basically, just smooth the 'animation' a bit? Pretty hard for low framerates.
 #   Could redraw() be called every 100ms for a couple seconds?
 
-#TODO, minor:
+#TODO, Medium Priority
+# * Display stats for whichever epoch the mouse is hovering over.
+# * Unless there's been a rebucketing, ONLY redraw the current epoch.
+# * BUGS that will affect zooming when endpoints can be added. Timestamps, as
+#   delivered by the backend start at t=0.
+#   * What happens if we start a new endpoint? It won't be horizontally in sync
+#     with the other endpoints.
+#   * If the oldest timestamp received is some huge number, but the only
+#     still-engaged target has an "oldest"timestamp of something small, zoomout
+#     will exceed the timepan of the graph.
+
+#TODO, Low Priority:
 # * be sure you're not getting a timestamp in JS and doing math on timestamps that
 #   have been sent to you by the python side.
 # * use icmp_seq * interval + rtt as timestamp for pongs?
@@ -349,6 +359,7 @@ class Graph {
   add(event) {
     let icmp_seq = event['icmp_seq'];
     this.newest_timestamp = Math.max(event['timestamp'], this.newest_timestamp);
+    layout_manager.set_potentially_oldest_timestamp(this.newest_timestamp);
 
     //There are a few situations we have to deal with here. First, what happens if the 'expected'
     //packet comes first, then the thing actually arrives? Frankly, this should be a TODO:, to
@@ -401,7 +412,6 @@ class Graph {
   }
 
   redraw() {
-    console.log('redraw()');
     const max_rtt = layout_manager.get_max_displayed_rtt();
     if(max_rtt != this.prev_max_rtt) {
       this.schedule_rebucket();
@@ -409,7 +419,6 @@ class Graph {
     this.prev_max_rtt = max_rtt;
 
     this.rebucket_if_necessary();
-    console.log('redraw(), post-rebucketing');
 
     const largest_known_bucket_count = layout_manager.get_largest_known_bucket_count();
 
@@ -520,15 +529,53 @@ class LayoutManager {
     this.width = window.innerWidth;
     this.height = window.innerHeight;
 
-    this.set_zoom(0, 60*5, true);
+    this.zoom_out_min_timestamp = 0;
+    this.zoom_out_max_timestamp = 60*5;
+    this.set_zoom(this.zoom_out_min_timestamp, this.zoom_out_max_timestamp, true);
+    this.oldest_timestamp = this.zoom_out_max_timestamp;
   }
 
-  set_zoom(start_timestamp, end_timestamp, appending) {
-    this.start_timestamp = start_timestamp;
-    this.end_timestamp = end_timestamp;
+  set_zoom(view_start_timestamp, view_end_timestamp, appending) {
+    this.view_start_timestamp = view_start_timestamp;
+    this.view_end_timestamp = view_end_timestamp;
     this.appending = appending;
 
     this.schedule_rebucket();
+  }
+
+  scroll(event, canvas_width) {
+    console.log(event.x, event.y, event.deltaY);
+    const x_scale = event.x/canvas_width;
+    const old_timespan = this.view_end_timestamp - this.view_start_timestamp;
+    // TODO: make this sensitive to velocity. My mouse won't give anything but +/-120
+    if(event.deltaY > 0) {
+      // Zoom out
+      var dt = old_timespan * 0.1;
+      //Prevent zooming out further than allowed:
+      if(old_timespan - dt < self.oldest_timestamp) {
+        dt = Math.max(0, old_timespan - self.oldest_timestamp);
+      }
+
+      this.view_start_timestamp -= x_scale * dt;
+      this.view_start_timestamp = Math.max(0, this.view_start_timestamp);
+      this.view_end_timestamp += (1.0-x_scale) * dt;
+      this.view_end_timestamp = Math.min(this.oldest_timestamp, this.view_end_timestamp);
+    } else {
+      // Zoom in
+      var dt = 0.1 * old_timespan;
+      const max_dt = old_timespan - 60; //TODO: what should the max zoom-in be?
+      dt = Math.min(dt, max_dt)
+
+      this.view_start_timestamp += x_scale * dt;
+      this.view_end_timestamp -= (1.0-x_scale) * dt;
+    }
+    const appending = (this.zoom_out_max_timestamp >= this.view_end_timestamp)
+    this.set_zoom(this.view_start_timestamp, this.view_end_timestamp, appending);
+    this.schedule_rebucket();
+  }
+
+  set_potentially_oldest_timestamp(timestamp) {
+    self.oldest_timestamp = Math.max(timestamp)
   }
 
   schedule_rebucket() {
@@ -549,18 +596,20 @@ class LayoutManager {
   }
 
   left_shift(num_epochs_displayed, event_timestamp) {
-    const epoch_timespan = (this.end_timestamp - this.start_timestamp) / num_epochs_displayed;
+    const epoch_timespan =
+        (this.view_end_timestamp - this.view_start_timestamp) / num_epochs_displayed;
 
-    const num_epochs_to_skip = Math.ceil((event_timestamp - this.end_timestamp) / epoch_timespan);
+    const num_epochs_to_skip =
+        Math.ceil((event_timestamp - this.view_end_timestamp) / epoch_timespan);
 
-    this.end_timestamp += epoch_timespan * num_epochs_to_skip;
-    this.start_timestamp += epoch_timespan * num_epochs_to_skip;
+    this.view_end_timestamp += epoch_timespan * num_epochs_to_skip;
+    this.view_start_timestamp += epoch_timespan * num_epochs_to_skip;
 
     this.schedule_rebucket();
   }
 
   get_zoom() {
-    return [this.start_timestamp, this.end_timestamp, this.appending];
+    return [this.view_start_timestamp, this.view_end_timestamp, this.appending];
   }
 
   get_max_displayed_rtt() {
@@ -624,6 +673,9 @@ class LayoutManager {
           new Graph(index, 0),
           undefined];
     }
+
+    var canvas = document.getElementById('cursor_canvas_' + index + '_0');
+    canvas.addEventListener('wheel', function(event) {layout_manager.scroll(event, canvas.width);});
   }
 
   deactivate_row(index) {
@@ -775,23 +827,26 @@ class Endpoint():
         timestamp = float(timestamp)
         rtt = float(rtt)
         ttl = int(ttl)
-        self.packet_states[icmp_seq] = ('R', timestamp)
 
-        data = {
-          'icmp_seq':  icmp_seq,
-          'msg_type':  'pong',
-          'ttl':       ttl,
-          'rtt':       rtt,
-          'raw':       line,
-          'index':     self.endpoint_index,
-          'timestamp': timestamp - self.start_time
-        }
-        print(self.endpoint_name, icmp_seq, data['timestamp'], line)
+        # If a packet arrives after it's been reported as lost, don't re-report it.
+        if icmp_seq >= self.oldest_unresolved_icmp_seq:
+          self.packet_states[icmp_seq] = ('R', timestamp)
 
-        self.most_recent_arrival_icmp_seq = icmp_seq
-        self.most_recent_arrival_timestamp = data['timestamp']
+          data = {
+            'icmp_seq':  icmp_seq,
+            'msg_type':  'pong',
+            'ttl':       ttl,
+            'rtt':       rtt,
+            'raw':       line,
+            'index':     self.endpoint_index,
+            'timestamp': timestamp - self.start_time
+          }
+          print(self.endpoint_name, icmp_seq, data['timestamp'], line)
 
-        events.append(encode_as_wire_message(data))
+          self.most_recent_arrival_icmp_seq = icmp_seq
+          self.most_recent_arrival_timestamp = data['timestamp']
+
+          events.append(encode_as_wire_message(data))
       elif line[0] == 'E':
         #TODO: User feedback?
         pass
@@ -824,6 +879,9 @@ class Endpoint():
         break
 
       self.oldest_unresolved_icmp_seq += 1
+
+    for resolved_icmp_seq in resolved_icmp_seqs:
+      del(self.packet_states[resolved_icmp_seq])
 
     return losses
 
