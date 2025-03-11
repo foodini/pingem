@@ -7,7 +7,7 @@
 # way it looks, feel free to express your ideas in the form of a pull request.
 
 #TODO, High Priority:
-# * Write a debug version of user_icmp that just hands back ~10-20 minutes of 
+# * Write a debug version of user_icmp that just hands back ~10-20 minutes of
 #   bogus data on demand - rapidly.
 # * scroll also needs a click-and-drag. =[
 # * scroll needs a way to turn off left-shifting (appending.)
@@ -300,6 +300,12 @@ class View {
   }
 }
 
+//TODO: should be part of the Graph class?
+const horizontal_frequencies = [
+  5, 15, 20, 30, 60, 90, 120, 180, 300, 600, 900, 1200, 1800, 3600, 2*3600, 3*3600, 4*3600,
+  6*3600, 9*3600, 12*3600, 24*3600, 2*24*3600, 3*24*3600, 6*24*3600, 12*24*3600
+];
+
 class Graph {
   constructor(row_index, col_index) {
     this.events = [];
@@ -408,7 +414,7 @@ class Graph {
       const max_rtt = layout_manager.get_max_displayed_rtt();
       const [start_timestamp, end_timestamp, append] = layout_manager.get_zoom();
       this.view = new View(this.events, start_timestamp, end_timestamp, append,
-                           this.num_displayed_epochs, this.buckets_per_epoch, 
+                           this.num_displayed_epochs, this.buckets_per_epoch,
                            max_rtt);
       this.rebucket_required = false;
     }
@@ -503,6 +509,71 @@ class Graph {
     }
     this.label_context.stroke();
 
+    const [min_timestamp, max_timestamp, _unused] = layout_manager.get_zoom();
+    const timespan = max_timestamp - min_timestamp;
+    var i;
+    for(i=0; i<horizontal_frequencies.length; i++) {
+      if(timespan/4 < horizontal_frequencies[i]) {
+        break;
+      }
+    }
+    i = Math.min(i, horizontal_frequencies.length - 1)
+
+    const dt = horizontal_frequencies[i];
+    //TODO: accessor for oldest timestamp
+    var t0;
+    if(layout_manager.oldest_timestamp < max_timestamp) {
+      t0 = layout_manager.oldest_timestamp;
+      while(t0 < max_timestamp - dt) {
+        t0 += dt;
+      }
+    } else {
+      t0 = Math.floor(max_timestamp/dt)*dt;
+    }
+    this.label_context.strokeStyle = '#4040ff';
+    this.label_context.fillStyle = '#4040ff';
+    this.label_context.textAlign='right';
+    this.label_context.textBaseline='bottom';
+    this.label_context.beginPath();
+    for(var t=t0; t>min_timestamp; t-=dt) {
+      const x = Math.floor((t-min_timestamp)/(max_timestamp-min_timestamp) * width);
+      this.label_context.moveTo(x, 0);
+      this.label_context.lineTo(x, height-1);
+      this.label_context.fillText(this.seconds_to_str(t-layout_manager.oldest_timestamp), x, height-1);
+    }
+    this.label_context.stroke();
+  }
+
+  seconds_to_str(t) {
+    var retval = ''
+    if(t<0) {
+      retval = '-';
+      t = -t;
+    } else {
+      retval = '+';
+    }
+    if(t<3600) {
+      const m = Math.floor(t/60);
+      const s = Math.floor(t%60);
+      if(m>0) {
+        retval += '' + m + 'm';
+      }
+      return retval + s + 's';
+    }
+    if(t<86400) {
+      const h = Math.floor(t/3600);
+      const m = Math.floor((t%3600)/60);
+      if(h>0) {
+        retval += '' + h + 'h';
+      }
+      return retval + m + 'm';
+    }
+    const d = Math.floor(t/86400);
+    const h = Math.floor((t%86400)/3600);
+    if(d>0) {
+      retval += '' + d + 'd';
+    }
+    return retval + h + 'h';
   }
 
   get_max_displayed_rtt() {
@@ -723,7 +794,7 @@ class LayoutManager {
       //TODO: set event['raw'] to undefined to save the space. I'm leaving it for now for
       // debugging reasons.
     }
-    document.getElementById('raw_pong'+event.index).textContent = 
+    document.getElementById('raw_pong'+event.index).textContent =
       '[' + this.endpoints[event['index']] + ']  ' + message;
 
     this.graphs[event['index']][0].add(event);
@@ -994,9 +1065,9 @@ class RequestHandler(BaseHTTPRequestHandler):
     self.add_misc_headers('text/html')
     self.end_headers()
 
-    # TODO: Better (django-like?) interpolation? 
-    # TODO: I can't use .format w/ index because it freaks out every time it
-    # sees a {, which javascript and css kick in all the time. I don't want to
+    # TODO: Better (django-like?) interpolation?
+    # I can't use .format w/ index because it freaks out every time it
+    # sees a {, which javascript and css use all the time. I don't want to
     # have to use \{ every time.....
     rows = ''
     for row_id in range(MAX_ENDPOINTS):
