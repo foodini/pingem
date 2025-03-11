@@ -7,6 +7,11 @@
 # way it looks, feel free to express your ideas in the form of a pull request.
 
 #TODO, High Priority:
+# * Write a debug version of user_icmp that just hands back ~10-20 minutes of 
+#   bogus data on demand - rapidly.
+# * scroll also needs a click-and-drag. =[
+# * scroll needs a way to turn off left-shifting (appending.)
+# * scroll needs a way to force rebucket and max zoom-out in lieu of left shift.
 # * Stats: Get the percentiles/means charted. Figure out what the overview pane
 # *        is going to look like and how it'll work.
 # * UI zoom: Shouldn't be too hard.
@@ -227,7 +232,7 @@ class View {
     this.timespan = end_timestamp - start_timestamp;
     this.start_timestamp = start_timestamp;
     this.end_timestamp = end_timestamp;
-    this.appending = true;
+    this.appending = appending;
     this.vertical_divisions = vertical_divisions;
     this.all_graph_max_rtt = max_rtt;
 
@@ -400,13 +405,11 @@ class Graph {
 
   rebucket_if_necessary() {
     if(this.rebucket_required || !this.view) {
-      console.log('Graph is rebucketing...');
       const max_rtt = layout_manager.get_max_displayed_rtt();
       const [start_timestamp, end_timestamp, append] = layout_manager.get_zoom();
       this.view = new View(this.events, start_timestamp, end_timestamp, append,
                            this.num_displayed_epochs, this.buckets_per_epoch, 
                            max_rtt);
-
       this.rebucket_required = false;
     }
   }
@@ -529,10 +532,8 @@ class LayoutManager {
     this.width = window.innerWidth;
     this.height = window.innerHeight;
 
-    this.zoom_out_min_timestamp = 0;
-    this.zoom_out_max_timestamp = 60*5;
-    this.set_zoom(this.zoom_out_min_timestamp, this.zoom_out_max_timestamp, true);
-    this.oldest_timestamp = this.zoom_out_max_timestamp;
+    this.oldest_timestamp = 1;
+    this.set_zoom(0, 60*5, true);
   }
 
   set_zoom(view_start_timestamp, view_end_timestamp, appending) {
@@ -544,7 +545,6 @@ class LayoutManager {
   }
 
   scroll(event, canvas_width) {
-    console.log(event.x, event.y, event.deltaY);
     const x_scale = event.x/canvas_width;
     const old_timespan = this.view_end_timestamp - this.view_start_timestamp;
     // TODO: make this sensitive to velocity. My mouse won't give anything but +/-120
@@ -552,30 +552,35 @@ class LayoutManager {
       // Zoom out
       var dt = old_timespan * 0.1;
       //Prevent zooming out further than allowed:
-      if(old_timespan - dt < self.oldest_timestamp) {
-        dt = Math.max(0, old_timespan - self.oldest_timestamp);
+      if(old_timespan + dt > this.oldest_timestamp) {
+        this.view_start_timestamp = 0;
+        this.view_end_timestamp = this.oldest_timestamp;
+      } else {
+        this.view_start_timestamp -= (x_scale) * dt;
+        this.view_start_timestamp = Math.max(0, this.view_start_timestamp);
+        this.view_end_timestamp += (1.0 - x_scale) * dt;
+        this.view_end_timestamp = Math.min(this.oldest_timestamp, this.view_end_timestamp);
       }
-
-      this.view_start_timestamp -= x_scale * dt;
-      this.view_start_timestamp = Math.max(0, this.view_start_timestamp);
-      this.view_end_timestamp += (1.0-x_scale) * dt;
-      this.view_end_timestamp = Math.min(this.oldest_timestamp, this.view_end_timestamp);
     } else {
       // Zoom in
       var dt = 0.1 * old_timespan;
       const max_dt = old_timespan - 60; //TODO: what should the max zoom-in be?
       dt = Math.min(dt, max_dt)
 
-      this.view_start_timestamp += x_scale * dt;
-      this.view_end_timestamp -= (1.0-x_scale) * dt;
+      this.view_start_timestamp += (x_scale) * dt;
+      this.view_end_timestamp -= (1.0 - x_scale) * dt;
     }
-    const appending = (this.zoom_out_max_timestamp >= this.view_end_timestamp)
+    // there needs to be some slop in the comparison to account for threads delivering messages
+    // in the middle of this process:
+    const appending = (this.view_end_timestamp >= this.oldest_timestamp - 0.5)
+
     this.set_zoom(this.view_start_timestamp, this.view_end_timestamp, appending);
     this.schedule_rebucket();
   }
 
   set_potentially_oldest_timestamp(timestamp) {
-    self.oldest_timestamp = Math.max(timestamp)
+    this.oldest_timestamp = Math.max(timestamp, this.oldest_timestamp);
+    console.log('set_potentially_oldest_timestamp('+ timestamp+'):', this.oldest_timestamp);
   }
 
   schedule_rebucket() {
