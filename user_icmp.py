@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 
-# TODO:
+# TODO, High Priority:
+# * Switch domain socket comms output to be human-readable so people using it as
+#   a ping replacement (like via socat) can grok it better.
+# * need to chroot jail the process
+# * handle Destination Net Unreachable.
+
+#TODO, Medium Priority:
 # * fileno isn't quite enough to ID a packet. What if there are two instances
 #   of user_icmp running at the same time? Each could have a caller on fileno=5
 #   and the two instance would confuse the other's responses as their own.
-# * Should I stop sending fileno over the network? Writting a mapper just adds
-#   more code that has to run in privileged mode.
 # * need to consider defense against abusers. I have a brief delay before
 #   sending starts, but I should keep a token bucket for each user and allow
 #   admin to set the refil rate and count.
+
+# TODO: Low Priority:
+# * Should I stop sending fileno over the network? Writting a mapper just adds
+#   more code that has to run in privileged mode.
 # * Do I need a defense against bursting? If 100 targets are added at the same
 #   time with the same interval, they're going to tend to affect each other.
 # * Track the number of times bump() has been called since a target was created.
 #   Slightly alter the ACTUAL amount we bump by to try to meet the average?
-# * SHould it be left to the user to determine RTT? If so, I can save 8 bytes.
-# * need to chroot jail the process
-# * handle Destination Net Unreachable.
-# * If a packet arrives after it has been reported as lost, don't record it in
-# * the oldest_reported hash. The entry will just leak there.
+# * Should it be left to the user to determine RTT? If so, I can save 8 bytes.
+#   Given that the current minimum packet size is 34, it's hard to justify.
 
 from collections import defaultdict
 import os
@@ -210,10 +215,17 @@ class QueueManager():
       if sleep_time > 0:
         time.sleep(sleep_time)
 
-      #TODO: deal with the race condition: Can a target still be queued after requestor has killed it?
-      ping = self.socket_manager.send(
-          next_target.resolved_address, next_target.fileno,
-          next_target.icmp_seq, next_target.min_packet_size)
+      ping = None
+      try:
+        #TODO: deal with the race condition: Can a target still be queued after requestor has killed it?
+        ping = self.socket_manager.send(
+            next_target.resolved_address, next_target.fileno,
+            next_target.icmp_seq, next_target.min_packet_size)
+      except OSError as e:
+        # "Network is Unreachable". If that's the case, report that the packet was sent. This isn't
+        # true, of course, but the way a user will experience it is as an inability to traverse the
+        # network.
+        ping = Ping(next_target.fileno, next_target.icmp_seq, time.time())
 
       self.events[next_target.fileno].put(ping)
       next_target.bump()
