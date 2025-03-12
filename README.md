@@ -1,12 +1,31 @@
 ## pingem
+# Rewrite
+I'm in the middle of a rewrite and redesign of this entire project. At the
+moment, the pingem script contains python and javascript and the python side
+gets its data from another python script which runs as root (to be able to
+mediate icmp echo traffic.)
+
+I'm going to replace pingem with a .html and broaden the capability of
+user_icmp.py to let it talk to local processes via a TCP connection. I didn't
+like this option at first because unix domain sockets allow you to interrogate
+the socket for information about what user is at the other end of the
+communication. If a user abuses the service, the logs can reflect that.
+
+I hope that I can still find out what user has made a request if I restrict
+connections to those coming from localhost (which I want anyway.) When a
+connection comes in, I'll do the Python/C equivalent of a netstat call to
+figure out what user has just opened a connection to the user_icmp service, log
+that user's info and continue.
+
+# Purpose
 I frequently leave ping running in a terminal so I have something to visually
-query when real-time comms start misbehaving. If Zoom starts misbehaving, a quick
+query when real-time comms start misbehaving. If Zoom starts jittering, a quick
 glance at a running ping will tell me if something has gone wrong with my net
-connection, or if the issue is on the other end. These are the kinds of paranoid
-habits you develop when you're no AT&T "broadband."
+connection or if the issue is on the other end. These are the kinds of paranoid
+habits you develop when you're on AT&T "broadband."
 
 I wanted something a little more long-term, though. Something that would show me
-a longer-term history of my connection state. I created a tool called pingstats,
+a longer-span history of my connection state. I created a tool called pingstats,
 that did just this for me, but it suffered from the requirement that it run in
 iTerm2. I love iTerm2, it's amazing, but it's Mac only. I wanted a solution that
 would make it possible to put out a presentable visual and simplify the process
@@ -51,13 +70,21 @@ convoluted edge cases in the code that make for lots of cross-interaction and
 difficult debugging. I'd rather just know exactly when packet number 1000 was
 sent.
 
-There are a couple options here: 1) wrap tcpdump. 2) rewrite ping. Given that I
-hate how limiting ping is, I find it a far preferable solution to provide a
-service that will respond to user requests and mediate ICMP traffic on the
-users' bahalf.  The user can only request pings and will only receive info
-about when those pings are sent and when their responses arrive. As a bonus, we
-can have icmp_seq ids that are as wide as we like. I chose 8 bytes because
-we're padding packets anyway, so there's little point in saving space. I
-dislike the heuristic that I had to create for turning 16-bit sequence ids into
-arbitrarily wide ones. Sooner or later it was going to bug out on me.
+There are a couple options here.
+
+Option #1 is to wrap tcpdump and continue using a ping subprocess. A setuid
+root executable that reports just the icmp packets that are associated with the
+user's sessions is attractive, but suffers from a fatal flaw. When the network
+we're trying to reach is unavailable, no packet is sent and we're back to
+guessing when icmp_seq # n was supposed to have been sent. 
+
+Option #2 is to provide a service - also setuid - that the user can connect to
+that will send and receive icmp traffic on the user's behalf. This allows us a
+number of advantages. First, we can pack a wider icmp_seq in our custom-built
+icmp packets. Second, even a total network outage will still track icmp traffic
+that _should_ have been sent, even if it wasn't. Basically, a network outage
+will look the same to the user as any other string of losses. If this service
+includes a connection method that can be reached by a browser running
+javascript, the project reduces down to only two parts instead of the original
+three. Hence, the rewrite.
 
