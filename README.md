@@ -1,21 +1,30 @@
 ## pingem
-# Rewrite
-I'm in the middle of a rewrite and redesign of this entire project. At the
-moment, the pingem script contains python and javascript and the python side
-gets its data from another python script which runs as root (to be able to
-mediate icmp echo traffic.)
+# Installing/running
+Run user_icmp2.py as root. Yes, I know. But as long as ICMP is still treated
+like it's the 1980 - and icmp echo/reply is lumped in with all the control
+packet types - we're pretty much screwed when it comes to getting a deep look
+at icmp traffic.
 
-I'm going to replace pingem with a .html and broaden the capability of
-user_icmp.py to let it talk to local processes via a TCP connection. I didn't
-like this option at first because unix domain sockets allow you to interrogate
-the socket for information about what user is at the other end of the
-communication. If a user abuses the service, the logs can reflect that.
+From there, just open the .html in a browser on the same machine as user_icmp2.
+The url accepts some parameters; 
+* endpoints is a comma-separated list of ping targets.
+* interval is the time delay between icmp packets to each endpoint.
+* packet_size is pretty easy to figure out. (The minimum is currently around 32)
 
-I hope that I can still find out what user has made a request if I restrict
-connections to those coming from localhost (which I want anyway.) When a
-connection comes in, I'll do the Python/C equivalent of a netstat call to
-figure out what user has just opened a connection to the user_icmp service, log
-that user's info and continue.
+So:
+  file:///home/me/pingem/pingem.html?endpoints=192.168.1.1,interval=0.1
+...will give you a track of network behavior to your local router... or
+whatever.
+
+# Issues
+There are a lot of 'em at the moment. See the TODO lists in the source files
+for the exhaustive list. The ones that are major usability blockers are;
+* It seems that user_icmp is getting stalled every 15 seconds or so on my
+hardware. I need to compare user_icmp data to tcpdump. I suspect that I need
+to respond to incoming packets more quickly. That'll be a fun night of socket
+options wrangling.
+* Labels on graphs (and raw output) are currently broken.
+* Need to be able to add/remove rows and change ping intervals.
 
 # Purpose
 I frequently leave ping running in a terminal so I have something to visually
@@ -82,8 +91,9 @@ Option #2 is to provide a service - also setuid - that the user can connect to
 that will send and receive icmp traffic on the user's behalf. This allows us a
 number of advantages. First, we can pack a wider icmp_seq in our custom-built
 icmp packets. Second, even a total network outage will still track icmp traffic
-that _should_ have been sent, even if it wasn't. Basically, a network outage
-will look the same to the user as any other string of losses. If this service
+that _should_ have been sent, even if it wasn't. (When there's "no route to
+host", the ping executable stops sending packets.) Basically, a network outage
+should look the same to the user as any other string of losses. If this service
 includes a connection method that can be reached by a browser running
 javascript, the project reduces down to only two parts instead of the original
 three. Hence, the rewrite.
