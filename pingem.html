@@ -1,118 +1,8 @@
-#!/usr/bin/env python3
-
-# If you're reading this, know that I am not, have never been, nor shall ever
-# be a frontend engineer. Being color blind means not giving two fucks about UI
-# because, for the most part, no-one in UI gives two fucks about CD users, and
-# it breeds a frustration with the entire topic. If you have a problem with the
-# way it looks, feel free to express your ideas in the form of a pull request.
-
-#TODO, High Priority:
-# * Write a debug version of user_icmp that just hands back ~10-20 minutes of
-#   bogus data on demand - rapidly.
-# * scroll also needs a click-and-drag. =[
-# * scroll needs a way to turn off left-shifting (appending.)
-# * scroll needs a way to force rebucket and max zoom-out in lieu of left shift.
-# * Stats: Get the percentiles/means charted. Figure out what the overview pane
-# *        is going to look like and how it'll work.
-# * UI zoom: Shouldn't be too hard.
-# * Allow forcible resize of the columns.
-# * Get the canvasas properly sized to their containers. The heuristic sucks ass.
-# * Smooth the transition between max_ttls when dropping one off the left side.
-#   Basically, just smooth the 'animation' a bit? Pretty hard for low framerates.
-#   Could redraw() be called every 100ms for a couple seconds?
-
-#TODO, Medium Priority
-# * Display stats for whichever epoch the mouse is hovering over.
-# * Unless there's been a rebucketing, ONLY redraw the current epoch.
-# * BUGS that will affect zooming when endpoints can be added. Timestamps, as
-#   delivered by the backend start at t=0.
-#   * What happens if we start a new endpoint? It won't be horizontally in sync
-#     with the other endpoints.
-#   * If the oldest timestamp received is some huge number, but the only
-#     still-engaged target has an "oldest"timestamp of something small, zoomout
-#     will exceed the timepan of the graph.
-
-#TODO, Low Priority:
-# * be sure you're not getting a timestamp in JS and doing math on timestamps that
-#   have been sent to you by the python side.
-# * use icmp_seq * interval + rtt as timestamp for pongs?
-# * WHAT IS CAUSING THE FALSE LOSS ABOUT 1S AFTER STARTUP?
-# * Make events a proper type and translate the event dicts to the instances to
-#   save on the hash lookup time.
-# * disable line wrap on the "raw" div.
-# * silence the exception when an auth fail occurs. Just log it or something.
-# * Get the vertical graduations on the label canvas.
-# * Get off of port 8000 and use a dynamically-selected port. (Start the server
-#   w/o an explicit port and just advertize whatever port the server is given.)
-# * Maybe an actual favicon.ico? Just pack it as a string?
-# * Allow user to alter packet size. (-s argument)
-# * I don't like organizing the endpoints by numeric index on the python side.
-#   I'd rather that just be a UI-side thing, but this way, the command-line order
-#   is preserved all the way through to the UI. As I said, I really don't like
-#   it.  (Am I still doing this? 2/27/2025)
-# * If one graph bumps over because it's appending, force an immediate redraw on
-#   them all so they stay in vertical sync.
-# * Add support for the zoom to just continuously show everything? Meh. Maybe.
-
-import argparse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import json
-import math
-import os
-import re
-import secrets
-import select
-import shutil
-import socket
-import subprocess
-from threading import Thread
-import time
-from urllib.parse import urlparse, parse_qs
-import webbrowser
-
-MAX_ENDPOINTS = 5
-
-parser = argparse.ArgumentParser(
-  description='pingem [-i interval] [-s packetsize] endpoint [endpoint [endpoint...]]')
-parser.add_argument('-i', '--interval', type=float, default=0.2,
-                    help='Time (as a float) between pings. Default=0.2')
-#TODO: compute the min at global level so it can be included properly in the helptext.
-parser.add_argument('-s', '--size', type=int, default=64,
-                    help='Minimum size of icmp packets. Default=64. Min~=34')
-parser.add_argument('endpoints', nargs='*',
-                    help='IP name or address of target[s]',
-                    default=['8.8.8.8'])
-cl_args = parser.parse_args()
-print(cl_args.endpoints)
-print(cl_args)
-
-#TODO: Do something sane if ping isn't found anywhere
-ping = shutil.which('ping')
-print('using ping binary at:' + ping)
-
-#TODO: Replace the X with an "icon" (a couple lines on canvas.)
-row_def = '''
-<tr id=tr_raw{y} class=tr_raw>
-  <td colspan=3>
-    <button class=close_button>X</button> <div class='terminal cell' id=raw_pong{y}></div>
-  </td>
-</tr>
-<tr id=tr_data{y}>
-  <td id='graph_container_{y}_0' class='graph_container'>
-    <canvas id='data_canvas_{y}_0' class='data_canvas'></canvas>
-    <canvas id='label_canvas_{y}_0' class='label_canvas'></canvas>
-    <canvas id='cursor_canvas_{y}_0' class='cursor_canvas'></canvas>
-  </td>
-  <td id='graph_container_{y}_1' class='graph_container'>
-    <canvas id='data_canvas_{y}_1' class='data_canvas'></canvas>
-    <canvas id='label_canvas_{y}_1' class='label_canvas'></canvas>
-    <canvas id='cursor_canvas_{y}_1' class='cursor_canvas'></canvas>
-  </td>
-</tr>
-'''
+<!-- TODO:
+* replace all the a+b+c string formatting with backtick interpolation: `${thing}${otherthing}`
 
 
-index = '''
+-->
 <html>
 <head>
 <title>pingem v1.0e-20</title>
@@ -137,11 +27,119 @@ index = '''
 <body>
 <div id=viewport_tracker height:100vh width:100vw></div>
 <table class=display_layout>
-  ROWS
+<!-- TODO: CAN THESE BE GENERATED FROM A TEMPLATE? -->
+<!-- ======================================== -->
+<tr id=tr_raw0 class=tr_raw style='display:none;'>
+  <td colspan=3>
+    <button class=close_button>X</button> <div class='terminal cell' id=raw_pong0></div>
+  </td>
+</tr>
+<tr id=tr_data0 style='display:none;'>
+  <td id='graph_container_0_0' class='graph_container'>
+    <canvas id='data_canvas_0_0' class='data_canvas'></canvas>
+    <canvas id='label_canvas_0_0' class='label_canvas'></canvas>
+    <canvas id='cursor_canvas_0_0' class='cursor_canvas'></canvas>
+  </td>
+  <td id='graph_container_0_1' class='graph_container'>
+    <canvas id='data_canvas_0_1' class='data_canvas'></canvas>
+    <canvas id='label_canvas_0_1' class='label_canvas'></canvas>
+    <canvas id='cursor_canvas_0_1' class='cursor_canvas'></canvas>
+  </td>
+</tr>
+<!-- ======================================== -->
+<tr id=tr_raw1 class=tr_raw style='display:none;'>
+  <td colspan=3>
+    <button class=close_button>X</button> <div class='terminal cell' id=raw_pong1></div>
+  </td>
+</tr>
+<tr id=tr_data1 style='display:none;'>
+  <td id='graph_container_1_0' class='graph_container'>
+    <canvas id='data_canvas_1_0' class='data_canvas'></canvas>
+    <canvas id='label_canvas_1_0' class='label_canvas'></canvas>
+    <canvas id='cursor_canvas_1_0' class='cursor_canvas'></canvas>
+  </td>
+  <td id='graph_container_1_1' class='graph_container'>
+    <canvas id='data_canvas_1_1' class='data_canvas'></canvas>
+    <canvas id='label_canvas_1_1' class='label_canvas'></canvas>
+    <canvas id='cursor_canvas_1_1' class='cursor_canvas'></canvas>
+  </td>
+</tr>
+<!-- ======================================== -->
+<tr id=tr_raw2 class=tr_raw style='display:none;'>
+  <td colspan=3>
+    <button class=close_button>X</button> <div class='terminal cell' id=raw_pong2></div>
+  </td>
+</tr>
+<tr id=tr_data2 style='display:none;'>
+  <td id='graph_container_2_0' class='graph_container'>
+    <canvas id='data_canvas_2_0' class='data_canvas'></canvas>
+    <canvas id='label_canvas_2_0' class='label_canvas'></canvas>
+    <canvas id='cursor_canvas_2_0' class='cursor_canvas'></canvas>
+  </td>
+  <td id='graph_container_2_1' class='graph_container'>
+    <canvas id='data_canvas_2_1' class='data_canvas'></canvas>
+    <canvas id='label_canvas_2_1' class='label_canvas'></canvas>
+    <canvas id='cursor_canvas_2_1' class='cursor_canvas'></canvas>
+  </td>
+</tr>
+<!-- ======================================== -->
+<tr id=tr_raw3 class=tr_raw style='display:none;'>
+  <td colspan=3>
+    <button class=close_button>X</button> <div class='terminal cell' id=raw_pong3></div>
+  </td>
+</tr>
+<tr id=tr_data3 style='display:none;'>
+  <td id='graph_container_3_0' class='graph_container'>
+    <canvas id='data_canvas_3_0' class='data_canvas'></canvas>
+    <canvas id='label_canvas_3_0' class='label_canvas'></canvas>
+    <canvas id='cursor_canvas_3_0' class='cursor_canvas'></canvas>
+  </td>
+  <td id='graph_container_3_1' class='graph_container'>
+    <canvas id='data_canvas_3_1' class='data_canvas'></canvas>
+    <canvas id='label_canvas_3_1' class='label_canvas'></canvas>
+    <canvas id='cursor_canvas_3_1' class='cursor_canvas'></canvas>
+  </td>
+</tr>
+<!-- ======================================== -->
+<tr id=tr_raw4 class=tr_raw style='display:none;'>
+  <td colspan=3>
+    <button class=close_button>X</button> <div class='terminal cell' id=raw_pong4></div>
+  </td>
+</tr>
+<tr id=tr_data4 style='display:none;'>
+  <td id='graph_container_4_0' class='graph_container'>
+    <canvas id='data_canvas_4_0' class='data_canvas'></canvas>
+    <canvas id='label_canvas_4_0' class='label_canvas'></canvas>
+    <canvas id='cursor_canvas_4_0' class='cursor_canvas'></canvas>
+  </td>
+  <td id='graph_container_4_1' class='graph_container'>
+    <canvas id='data_canvas_4_1' class='data_canvas'></canvas>
+    <canvas id='label_canvas_4_1' class='label_canvas'></canvas>
+    <canvas id='cursor_canvas_4_1' class='cursor_canvas'></canvas>
+  </td>
+</tr>
+<!-- ======================================== -->
 </table>
 <script type='text/javascript' defer>
-var beep_sound = new Audio('https://cdn.pixabay.com/audio/2022/03/10/audio_c07a9f33fd.mp3');
-var already_beeped = false;
+const MAX_ENDPOINTS = 5;
+
+const url_parameters = new URLSearchParams(window.location.search);
+const endpoint_parameter = url_parameters.get('endpoint');
+const endpoints_parameter = url_parameters.get('endpoints');
+var initial_endpoints = []
+if(endpoints_parameter) {
+  for(const ep of endpoints_parameter.split(',')) {
+    initial_endpoints.push(ep);
+  }
+}
+if(endpoint_parameter) {
+  initial_endpoints.push(endpoint_parameter);
+}
+if(initial_endpoints.length == 0) {
+  initial_endpoints = ['8.8.8.8','amazon.com','speedtest.net']
+}
+const initial_size = parseInt(url_parameters.get('packet_size') || 64);
+const initial_interval = parseFloat(url_parameters.get('interval') || 1.0);
 
 class Epoch {
   constructor(vertical_divisions, all_graph_max_rtt) {
@@ -158,7 +156,7 @@ class Epoch {
 
   add(event) {
     this.count_all++;
-    if(event['msg_type'] == 'pong') {
+    if(event['type'] == 'reply') {
       this.count_pong++;
       this.total_rtt += event['rtt'];
       var bucket_id = Math.floor(this.buckets.length * event['rtt'] / (this.all_graph_max_rtt + 0.001));
@@ -290,7 +288,7 @@ class View {
       if(epoch) {
         const epoch_max_displayed_rtt = epoch.get_max_displayed_rtt();
         if(epoch_max_displayed_rtt != undefined) {
-          //This catches a rare case where the most recent epoch has only a losses in it.
+            //This catches a rare case where the most recent epoch has only a losses in it.
           this_graph_max_rtt = Math.max(this_graph_max_rtt, epoch_max_displayed_rtt);
         }
       }
@@ -322,7 +320,7 @@ class Graph {
 
     this.rebucket_required = true;
 
-    // I've chosen to have the pixel dimensions attached to individual graphs
+    // I have chosen to have the pixel dimensions attached to individual graphs
     // instead of to the layout manager because I may choose to have the heights
     // independently resizeable.
     this.epoch_pixel_width = 7;
@@ -468,11 +466,6 @@ class Graph {
         }
         const [loss, avg, _100, _90, _50, _10, _0] = stats;
         if(loss) {
-          if(loss > 0.9) {
-            // This is only here to help debug the issue with losses getting ahead of arrivals.
-            beep_sound.play();
-            // debugger;
-          }
           var loss_y0 = this.inset_height + this.top_offset; // TODO: -1?
           var loss_y1 = loss_y0 - loss * this.inset_height;
           this.draw_line(x, loss_y0, x, loss_y1, 1, '#40a040');
@@ -513,7 +506,7 @@ class Graph {
     const timespan = max_timestamp - min_timestamp;
     var i;
     for(i=0; i<horizontal_frequencies.length; i++) {
-      if(timespan/4 < horizontal_frequencies[i]) {
+      if(timespan/6 < horizontal_frequencies[i]) {
         break;
       }
     }
@@ -530,8 +523,8 @@ class Graph {
     } else {
       t0 = Math.floor(max_timestamp/dt)*dt;
     }
-    this.label_context.strokeStyle = '#4040ff';
-    this.label_context.fillStyle = '#4040ff';
+    //this.label_context.strokeStyle = '#4040ff';
+    //this.label_context.fillStyle = '#4040ff';
     this.label_context.textAlign='right';
     this.label_context.textBaseline='bottom';
     this.label_context.beginPath();
@@ -563,7 +556,7 @@ class Graph {
     if(t<86400) {
       const h = Math.floor(t/3600);
       const m = Math.floor((t%3600)/60);
-      if(h>0) {
+      if(h > 0) {
         retval += '' + h + 'h';
       }
       return retval + m + 'm';
@@ -585,14 +578,107 @@ class Graph {
   }
 }
 
+class ICMPConnector {
+  constructor(graph, unresolved_address, packet_size, interval) {
+    this.graph = graph;
+    this.unresolved_address = unresolved_address;
+    this.packet_size = packet_size;
+    this.interval = interval;
+    this.transiting_events = {};
+    this.oldest_unresolved_icmp_seq = 1;
+
+    //TODO: make port configurable
+    const stream_url =
+        `http://localhost:8000/?address=${unresolved_address}` +
+        `&interval=${interval}&packet_size=${packet_size}`;
+    this.event_source = new EventSource(stream_url);
+    this.event_source.onmessage = (json_event) => {
+      const event = JSON.parse(json_event.data);
+      //TODO: I overwrite the timestamp that was given by the user_icmp connector? I don't like
+      //      mixing timestamps from the two sources, ever if they SHOULD be running on the same
+      //      machine and SHOULD be the same. Is this the right thing to do?
+      event['timestamp'] = Date.now() / 1000.0;
+      if(event['type'] == 'ping') {
+        this.transiting_events[event['icmp_seq']] = event;
+      } else {
+        // It must be a 'reply'
+        this.graph.add(event);
+      }
+    }
+    setTimeout(this.loss_reporter, 500, this); 
+  }
+
+  loss_reporter(THIS) {
+    while(THIS.oldest_unresolved_icmp_seq in THIS.transiting_events) {
+      const oldest_transiting_event = THIS.transiting_events[THIS.oldest_unresolved_icmp_seq];
+      var expiry_time = oldest_transiting_event['timestamp'] + 3.0;
+      const now = Date.now() / 1000.0;
+      if(expiry_time > now) {
+        break;
+      } else {
+        const loss_event = {
+          'type': 'loss',
+          //I use the timestamp on the original ping message for a few reasons: it looks better
+          //having losses reported in the very first epoch, but mostly because the timeout that
+          //triggers this function does not fire when the window is hidden. If you use 'now' as the
+          //timestamp for the loss every lost packet is reported with the time the user forgegrounded
+          //the window.
+          'timestamp': oldest_transiting_event['timestamp'],
+          'icmp_seq': oldest_transiting_event['icmp_seq']
+        };
+        THIS.graph.add(loss_event);
+        delete THIS.transiting_events[THIS.oldest_unresolved_icmp_seq];
+        THIS.oldest_unresolved_icmp_seq++;
+      }
+    }
+    setTimeout(THIS.loss_reporter, 500, THIS); 
+  }
+}
+
+class Row{
+  constructor(index, unresolved_address, packet_size, interval) {
+    this.index = index;
+    this.unresolved_address = unresolved_address;
+    //NOTE that JS doesn't allow for DNS resolution. No matter, we only display
+    //the unresolved name and whatever the user_icmp backend returns to us.
+    this.packet_size = packet_size;
+    this.interval = interval;
+
+    this.graph = undefined; // This gets set up in activate_table_row.
+    this.activate_table_row(index);
+
+    this.icmp_connector = new ICMPConnector(this.graph, unresolved_address, packet_size, interval);
+  }
+
+  get_graph() {
+    return this.graph;
+  }
+
+  activate_table_row(index) {
+    console.log('activating row ' + index);
+    document.getElementById('tr_raw'+index).style.display = 'table-row';
+    document.getElementById('tr_data'+index).style.display = 'table-row';
+
+    this.graph = new Graph(index, 0);
+
+    var canvas = document.getElementById('cursor_canvas_' + index + '_0');
+    canvas.addEventListener('wheel', function(event) {layout_manager.scroll(event, canvas.width);});
+  }
+
+  destructor() {
+    console.log('deactivating row ' + index);
+    document.getElementById('tr_raw'+index).style.display = 'none';
+    document.getElementById('tr_data'+index).style.display = 'none';
+
+    delete(this.graph);
+  }
+}
+
 class LayoutManager {
   constructor() {
-    // TODO: get off the hashes
-    // Just a map of row index to the command-line endpoint name:
-    this.endpoints = {}
+    this.rows = new Array(MAX_ENDPOINTS);
 
-    // A 2D map keyed first on row index, then a list of 2 graphs.
-    this.graphs = {}
+    this.setup_endpoints();
 
     const resizeObserver = new ResizeObserver(entries => {
       layout_manager.on_resize();
@@ -651,12 +737,11 @@ class LayoutManager {
 
   set_potentially_oldest_timestamp(timestamp) {
     this.oldest_timestamp = Math.max(timestamp, this.oldest_timestamp);
-    console.log('set_potentially_oldest_timestamp('+ timestamp+'):', this.oldest_timestamp);
   }
 
   schedule_rebucket() {
-    for(const [graph_index, graph] of Object.entries(this.graphs)) {
-      graph[0].schedule_rebucket();
+    for(var row of this.get_active_rows()) {
+      row.get_graph().schedule_rebucket();
     }
 
     this.largest_known_bucket_count = 1;
@@ -690,15 +775,19 @@ class LayoutManager {
 
   get_max_displayed_rtt() {
     var max_rtt = 0.0;
-    for(const [key, [longspan, unused]] of Object.entries(this.graphs)) {
-      max_rtt = Math.max(max_rtt, longspan.get_max_displayed_rtt());
+    for(const row of this.get_active_rows()) {
+      max_rtt = Math.max(max_rtt, row.get_graph().get_max_displayed_rtt());
     }
 
     return max_rtt;
   }
 
+  get_active_rows() {
+    return this.rows.filter(r => r!=undefined);
+  }
+
   get_row_count() {
-    return Object.keys(this.graphs).length;
+    return this.get_active_rows().length;
   }
 
   on_resize() {
@@ -729,403 +818,24 @@ class LayoutManager {
       ;
 
     console.log('setting geometries to ' + this.data_width + ',' + this.data_height);
-    for(var index of Object.keys(this.graphs)) {
-      if(this.graphs[index] != undefined) {
-        /* TODO: how to handle the second column? It's not going to be a Graph type. */
-        this.graphs[index][0].set_geometry(this.data_width*2, this.data_height);
-      }
+    for(var row of this.get_active_rows()) {
+      row.get_graph().set_geometry(this.data_width*2, this.data_height);
     }
 
     this.schedule_rebucket();
   }
 
-  activate_row(index) {
-    console.log('activating row ' + index);
-    document.getElementById('tr_raw'+index).style.display = 'table-row';
-    document.getElementById('tr_data'+index).style.display = 'table-row';
-
-    if(this.graphs[index] == undefined) {
-      this.graphs[index] = [
-          new Graph(index, 0),
-          undefined];
-    }
-
-    var canvas = document.getElementById('cursor_canvas_' + index + '_0');
-    canvas.addEventListener('wheel', function(event) {layout_manager.scroll(event, canvas.width);});
-  }
-
-  deactivate_row(index) {
-    console.log('deactivating row ' + index);
-    document.getElementById('tr_raw'+index).style.display = 'none';
-    document.getElementById('tr_data'+index).style.display = 'none';
-
-    delete(this.graphs[index]);
-  }
-
-  handle_endpoints_list(data) {
-    console.log('endpoint_list received:', data)
-    this.endpoints = {};
-
-    for(let index=0; index<MAX_ENDPOINTS; index++) {
-      if(data.endpoints[index]) {
-        this.activate_row(index);
-        this.endpoints[index] = data.endpoints[index];
-      } else {
-        this.deactivate_row(index);
-      }
+  setup_endpoints() {
+    for(let index=0; index<initial_endpoints.length; index++) {
+      this.rows[index] = new Row(index, initial_endpoints[index], initial_size, initial_interval);
     }
 
     this.on_resize();
-    console.log('endpoints:');
-    console.log(this.endpoints);
-  }
-
-  handle_message(event) {
-    if(event.msg_type == 'endpoints') {
-      this.handle_endpoints_list(event);
-      return;
-    }
-
-    let message = '';
-    if(event.msg_type == 'expected') {
-      message = 'Lost icmp_seq:' + event['icmp_seq'];
-    } else if(event.msg_type == 'pong') {
-      message = event['raw'];
-      //TODO: set event['raw'] to undefined to save the space. I'm leaving it for now for
-      // debugging reasons.
-    }
-    document.getElementById('raw_pong'+event.index).textContent =
-      '[' + this.endpoints[event['index']] + ']  ' + message;
-
-    this.graphs[event['index']][0].add(event);
   }
 }
 
-/*TODO: this doesn't really need to be a class.*/
-class DataRelay {
-  constructor() {
-    const stream_url = '/stream/?secret='+SECRET;
-    this.event_source = new EventSource(stream_url);
-    this.event_source.onmessage = (event) => {
-      const json_data=event.data;
-      const data = JSON.parse(json_data);
-      layout_manager.handle_message(data);
-    };
-    this.event_source.onerror = (error) => {
-      console.error('event_source.onerror:', error);
-    };
-    console.log('data stream handler is set up');
-  }
-}
-
-let data_relay = new DataRelay();
 let layout_manager = new LayoutManager();
 
 </script>
 </body>
-'''
-
-secret = secrets.randbelow(1000000000000000)
-print('using secret', secret)
-
-SOCKET_PATH = '/tmp/user_icmp_socket'
-
-def start_browser():
-  # give the server a moment to start up. I've never seen this to be necessary,
-  # but you never know.
-  time.sleep(1.0)
-  webbrowser.open(f'http://127.0.0.1:8000?secret={secret}', new=0)
-
-def encode_as_wire_message(data):
-  json_encoded = json.dumps(data)
-  return bytes('data: ' + json_encoded + '\n\n', 'utf8')
-
-class Endpoint():
-  def __init__(self, endpoint_name, endpoint_index, interval):
-    self.endpoint_name = endpoint_name
-    self.endpoint_index = endpoint_index
-    self.start_time = time.time()
-    self.oldest_unresolved_icmp_seq = 1
-    self.packet_states = {}
-
-    self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    #TODO: provide feedback to the user when socket isn't available.
-    self.socket.settimeout(0.0)
-    self.socket.connect(SOCKET_PATH)
-    #TODO: make ping size user-configurable
-    self.socket.sendall(f'P {self.endpoint_name} {interval} {cl_args.size}'.encode())
-
-    self.input_buffer = ''
-    self.buffered_events = []
-
-  def get_next_event_from_socket(self):
-    while not self.buffered_events and '\n' not in self.input_buffer:
-      try:
-        bytes_received = self.socket.recv(2048)
-        #TODO: detect event where server goes away and handle gracefully. (inform user.)
-        if len(bytes_received) > 0:
-          self.input_buffer += bytes_received.decode()
-      except TimeoutError as to:
-        return None
-      except BlockingIOError:
-        #This is the exception you'll usually get on timeout. Odd choice for them, but whatever.
-        return None
-
-    events = self.input_buffer.split('\n')
-    if events[-1] == '':
-      self.input_buffer = events.pop()
-
-    self.buffered_events += events
-
-    if self.buffered_events:
-      return self.buffered_events.pop(0)
-    else:
-      return None
-
-  #TODO: gets only one. Any way to do better without re-calling select?
-  def get_events(self):
-    events = []
-
-    while True:
-      line = self.get_next_event_from_socket()
-
-      if not line:
-        return events
-
-      if line[0] == 'S':
-        _cmd, _channel, icmp_seq, timestamp = line.split()
-        icmp_seq = int(icmp_seq)
-        timestamp = float(timestamp)
-        self.packet_states[icmp_seq] = ('S', timestamp)
-      elif line[0] == 'R':
-        _cmd, _channel, icmp_seq, timestamp, rtt, responder, ttl = line.split()
-        icmp_seq = int(icmp_seq)
-        timestamp = float(timestamp)
-        rtt = float(rtt)
-        ttl = int(ttl)
-
-        # If a packet arrives after it's been reported as lost, don't re-report it.
-        if icmp_seq >= self.oldest_unresolved_icmp_seq:
-          self.packet_states[icmp_seq] = ('R', timestamp)
-
-          data = {
-            'icmp_seq':  icmp_seq,
-            'msg_type':  'pong',
-            'ttl':       ttl,
-            'rtt':       rtt,
-            'raw':       line,
-            'index':     self.endpoint_index,
-            'timestamp': timestamp - self.start_time
-          }
-          print(self.endpoint_name, icmp_seq, data['timestamp'], line)
-
-          self.most_recent_arrival_icmp_seq = icmp_seq
-          self.most_recent_arrival_timestamp = data['timestamp']
-
-          events.append(encode_as_wire_message(data))
-      elif line[0] == 'E':
-        #TODO: User feedback?
-        pass
-      else:
-        print(f'NONMATCHING LINE {self.endpoint_name}:', line)
-
-  def get_losses(self):
-    losses = []
-
-    #TODO: make user configurable?
-    timeout_time = 3.0
-
-    now = time.time()
-    resolved_icmp_seqs = []
-    while self.oldest_unresolved_icmp_seq in self.packet_states:
-      if self.packet_states[self.oldest_unresolved_icmp_seq][0] == 'R':
-        resolved_icmp_seqs.append(self.oldest_unresolved_icmp_seq)
-      elif self.packet_states[self.oldest_unresolved_icmp_seq][1] < now - timeout_time:
-        resolved_icmp_seqs.append(self.oldest_unresolved_icmp_seq)
-        data = {
-          'msg_type':  'expected',
-          'icmp_seq':  self.oldest_unresolved_icmp_seq,
-          'index':     self.endpoint_index,
-          'timestamp': self.oldest_unresolved_icmp_seq * cl_args.interval
-        }
-        losses.append(encode_as_wire_message(data))
-        print('lost:', data)
-      else:
-        # the oldest packet hasn't been received, nor has it timed out. We'll check it again later.
-        break
-
-      self.oldest_unresolved_icmp_seq += 1
-
-    for resolved_icmp_seq in resolved_icmp_seqs:
-      del(self.packet_states[resolved_icmp_seq])
-
-    return losses
-
-  def get_wide_icmp_seq(self, narrow):
-    now = time.time()
-    elapsed = now - self.start_time
-    #Compute how many 65k runs we should expect to have completed:
-    runs = elapsed/(65536.0 * cl_args.interval)
-    runs_fract, runs_floor = math.modf(runs)
-    runs_floor = int(runs_floor)
-
-    if runs_fract >= 0.8 and narrow < 32768:
-        return narrow + (65536 * runs_floor + 1)
-    elif runs_fract < 0.2 and narrow > 32768:
-        return narrow + (65536 * runs_floor - 1)
-    else:
-      return narrow + 65536 * runs_floor
-
-'''
-  # returns True if this icmp_seq has never been reported before, False otherwise
-  def needs_reporting(self, icmp_seq):
-    if icmp_seq < self.all_reported_before or icmp_seq in self.reported:
-      return False
-
-    self.reported[icmp_seq] = True
-
-    # delete all the records of reported packets that we don't need anymore.
-    while (self.all_reported_before) in self.reported:
-      del(self.reported[self.all_reported_before])
-      self.all_reported_before += 1
-
-    return True
-'''
-
-class PingManager():
-  def __init__(self, endpoint_names):
-    self.interval = cl_args.interval
-
-    # We use a dict here because we want to be able to delete an entry without
-    # the ide of later entries changing:
-    self.endpoints = {}
-    for endpoint_name in endpoint_names:
-      self.add_endpoint(endpoint_name)
-
-  def add_endpoint(self, endpoint_name):
-    endpoint_index = None
-    for index in range(MAX_ENDPOINTS):
-      if index not in self.endpoints:
-        endpoint_index = index
-        break
-
-    if endpoint_index is None:
-      raise "Too many endpoints requested"
-
-    print('ENDPOINT BEING ADDED: ' + endpoint_name)
-    self.endpoints[endpoint_index] = Endpoint(endpoint_name, endpoint_index, cl_args.interval)
-
-  def get_events(self):
-    all_events = []
-    fds = []
-    fds_to_endpoints = {}
-
-    for endpoint_index, endpoint in self.endpoints.items():
-      fds.append(endpoint.socket)
-      fds_to_endpoints[endpoint.socket] = endpoint
-
-    ready_fds, _, _ = select.select(fds, [], [], 0.1)
-
-    for fd in ready_fds:
-      events = fds_to_endpoints[fd].get_events()
-      if events:
-        all_events += events
-
-    for endpoint_index, endpoint in self.endpoints.items():
-      all_events += endpoint.get_losses()
-
-    return all_events
-
-  def get_endpoint_names(self):
-    return {k:v.endpoint_name for k,v in self.endpoints.items()}
-
-#TODO: Get this constant in the class
-class RequestHandler(BaseHTTPRequestHandler):
-  def check_secret(self):
-    # TODO: get the secret out of the url so it can't be shoulder-surfed. This isn't a sufficiently
-    #       critical app to do any real user auth. If the user started the app, that's good enough.
-    self.parsed_url = urlparse(self.path)
-    self.query_params = parse_qs(self.parsed_url.query)
-
-    if ('secret' not in self.query_params or
-        type(self.query_params['secret']) != list or
-        int(self.query_params['secret'][0]) != secret):
-      return False
-    return True
-
-  def add_misc_headers(self, content_type):
-    self.send_header('Content-type', content_type)
-    self.send_header('Cache-Control', 'no-cache')
-    self.send_header('Connection', 'keep-alive')
-    self.send_header('Access-Control-Allow-Credentials', 'true')
-    self.send_header('Access-Control-Allow-Origin', '*')
-
-  def serve_index(self):
-    self.send_response(200)
-    self.add_misc_headers('text/html')
-    self.end_headers()
-
-    # TODO: Better (django-like?) interpolation?
-    # I can't use .format w/ index because it freaks out every time it
-    # sees a {, which javascript and css use all the time. I don't want to
-    # have to use \{ every time.....
-    rows = ''
-    for row_id in range(MAX_ENDPOINTS):
-      rows += row_def.format(y=row_id)
-    hydrated_index = index.replace('SECRET', str(secret))
-    hydrated_index = hydrated_index.replace('ROWS', rows)
-    hydrated_index = hydrated_index.replace('MAX_ENDPOINTS', str(MAX_ENDPOINTS))
-    encoded_index = bytes(hydrated_index, 'utf8')
-    self.send_header('Content-Length', len(encoded_index))
-    self.wfile.write(encoded_index)
-
-  def send_endpoint_update(self):
-    data = {}
-    data['msg_type'] = 'endpoints'
-    data['endpoints'] = self.ping_manager.get_endpoint_names()
-    print('Sending endpoint update: ', data)
-    self.wfile.write(encode_as_wire_message(data))
-
-  def serve_stream(self):
-    self.send_response(200)
-    self.add_misc_headers('text/event-stream')
-    self.end_headers()
-
-    print('Beginning to serve stream...')
-
-    self.ping_manager = PingManager(cl_args.endpoints)
-    self.send_endpoint_update()
-
-    while(True):
-      for event in self.ping_manager.get_events():
-        self.wfile.write(event)
-        #TODO: "I/O operation on a closed file" after machine sleeps.
-        self.wfile.flush()
-
-  def do_GET(self):
-    if('favicon.ico' in self.path):
-      self.send_error(404, "Resource not found")
-    else:
-      if(not self.check_secret()):
-        #print('failed to authorize:' + self.path)
-        pass
-      else:
-        if(self.parsed_url.path == '/'):
-          self.serve_index()
-          self.finish()
-        elif(self.parsed_url.path == '/stream/'):
-          self.serve_stream()
-      self.connection.close()
-
-def run(server_class=ThreadingHTTPServer, handler_class=RequestHandler):
-  #TODO: allow the port number to be dynamically assigned.
-  server_address = ('', 8000) # serve on all interfaces, port 80
-  httpd = server_class(server_address, handler_class)
-  t = Thread(target=start_browser)
-  t.run()
-  print('starting httpd...')
-  httpd.serve_forever()
-
-
-run()
-print('after run')
+</html>
