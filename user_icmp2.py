@@ -320,7 +320,7 @@ class RequestHandler(BaseHTTPRequestHandler):
     keys = list(endpoint.keys())
     keys.sort()
 
-    if keys != ['address', 'interval', 'packet_size'] or client_address != '127.0.0.1':
+    if keys != ['address', 'interval', 'packet_size'] or str(client_address) != '127.0.0.1':
       self.send_response(404)
       self.end_headers()
       self.finish()
