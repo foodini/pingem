@@ -26,6 +26,7 @@
 
 from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
 import os
 from queue import PriorityQueue, Queue
 import random
@@ -208,8 +209,14 @@ class QueueManager():
         #TODO: make this block on a locking gate that is released by add_target
         time.sleep(1)
 
-      with self.queue_lock:
-        _, next_target = self.queue.get()
+      try:
+        with self.queue_lock:
+          _, next_target = self.queue.get()
+      except TypeError as e:
+        # I once got a "TypeError '<' not supported between instances of Target and Target on
+        # the self.queue.get() line. I want to be able to dig into why that's happening.
+        import ipdb; ipdb.set_trace()
+        print(e);
 
       #TODO: replace this with something that can be interrupted by add_target:
       sleep_time = next_target.next_ping_time - time.time()
@@ -292,6 +299,7 @@ class RequestHandler(BaseHTTPRequestHandler):
     return bytes('data: ' + str(data) + '\n\n', 'utf8')
 
   def do_GET(self):
+    client_address = ipaddress.ip_address(self.client_address[0])
     parsed_url = urlparse(self.path)
     query_params = parse_qs(parsed_url.query)
 
@@ -312,7 +320,7 @@ class RequestHandler(BaseHTTPRequestHandler):
     keys = list(endpoint.keys())
     keys.sort()
 
-    if keys != ['address', 'interval', 'packet_size']:
+    if keys != ['address', 'interval', 'packet_size'] or client_address != '127.0.0.1':
       self.send_response(404)
       self.end_headers()
       self.finish()
