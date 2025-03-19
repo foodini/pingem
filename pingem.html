@@ -304,12 +304,8 @@ const horizontal_frequencies = [
   6*3600, 9*3600, 12*3600, 24*3600, 2*24*3600, 3*24*3600, 6*24*3600, 12*24*3600
 ];
 
-class Graph {
-  constructor(row_index, col_index) {
-    this.events = [];
-    this.prev_max_rtt = 1;
-    this.newest_timestamp = 0.0;
-    this.first_active_event = 0;
+class RTTDisplay {
+  constructor(row_index, col_index, display_block_width, display_block_height) {
     this.data_canvas = document.getElementById('data_canvas_'+row_index+'_'+col_index);
     this.label_canvas = document.getElementById('label_canvas_'+row_index+'_'+col_index);
     this.cursor_canvas = document.getElementById('cursor_canvas_'+row_index+'_'+col_index);
@@ -318,17 +314,28 @@ class Graph {
     this.cursor_context = this.cursor_canvas.getContext('2d');
     this.graph_container = document.getElementById('graph_container_'+row_index+'_'+col_index);
 
-    this.rebucket_required = true;
+    this.display_block_width = display_block_width;
+    this.display_block_height = display_block_height;
+
+    this.inset_width = 0;
+    this.inset_height = 0;
+  }
+}
+
+class Graph extends RTTDisplay {
+  constructor(row_index, col_index) {
+    super(row_index, col_index, 7, 5);
+    this.events = [];
+    this.prev_max_rtt = 1;
+    this.newest_timestamp = 0.0;
+    this.first_active_event = 0;
+
+    this.schedule_rebucket();
 
     // I have chosen to have the pixel dimensions attached to individual graphs
     // instead of to the layout manager because I may choose to have the heights
     // independently resizeable.
-    this.epoch_pixel_width = 7;
-    this.epoch_pixel_width_center = Math.floor(this.epoch_pixel_width / 2) + 1;
-    this.bucket_pixel_height = 5;
-    this.bucket_pixel_height_center = Math.floor(this.bucket_pixel_height_center / 2) + 1;
-    this.inset_width = 0;
-    this.inset_height = 0;
+    this.display_block_width_center = Math.floor(this.display_block_width / 2) + 1;
     this.vertical_label_divisions = 5.0;
   }
 
@@ -343,17 +350,13 @@ class Graph {
       canvas.height = this.height;
     }
 
-    this.graph_container.width = this.width
-      - 5 /* I've no idea why this is necessary */
-      ;
-    this.graph_container.height = this.height
-      + 2 /* I've no idea why this is necessary */
-      ;
+    this.graph_container.width = this.width;
+    this.graph_container.height = this.height;
 
-    this.num_displayed_epochs = Math.floor(this.graph_container.width / this.epoch_pixel_width);
-    var new_inset_width = this.num_displayed_epochs * this.epoch_pixel_width;
-    this.buckets_per_epoch = Math.floor(this.graph_container.height / this.bucket_pixel_height);
-    var new_inset_height = this.buckets_per_epoch * this.bucket_pixel_height;
+    this.num_displayed_epochs = Math.floor(this.graph_container.width / this.display_block_width);
+    var new_inset_width = this.num_displayed_epochs * this.display_block_width;
+    this.buckets_per_epoch = Math.floor(this.graph_container.height / this.display_block_height);
+    var new_inset_height = this.buckets_per_epoch * this.display_block_height;
 
     this.left_offset = Math.floor((this.graph_container.width - new_inset_width)/2);
     this.top_offset = Math.floor((this.graph_container.height - new_inset_height)/2);
@@ -439,9 +442,9 @@ class Graph {
       const buckets = this.view.get_buckets(epoch_id);
       if(buckets != undefined) {
         var x =
-            this.left_offset + (epoch_id * this.epoch_pixel_width) + this.epoch_pixel_width_center;
+            this.left_offset + (epoch_id * this.display_block_width) + this.display_block_width_center;
         var y0 = 0;
-        var y1 = this.bucket_pixel_height;
+        var y1 = this.display_block_height;
         this.data_context.moveTo(x, 0);
         for(var bucket_id=buckets.length-1; bucket_id >= 0; bucket_id--) {
           if(buckets[bucket_id]) {
@@ -454,10 +457,10 @@ class Graph {
             if(buckets[bucket_id] == largest_known_bucket_count) {
               color = `rgb(255,0,0)`;
             }
-            this.draw_line(x, y0, x, y1, this.epoch_pixel_width, color);
+            this.draw_line(x, y0, x, y1, this.display_block_width, color);
           }
-          y0 += this.bucket_pixel_height;
-          y1 += this.bucket_pixel_height;
+          y0 += this.display_block_height;
+          y1 += this.display_block_height;
         }
 
         const stats = this.view.get_stats(epoch_id);
