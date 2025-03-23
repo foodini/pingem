@@ -641,7 +641,7 @@ class ICMPConnector {
         // It's possible that the packet arrived after we'd assumed it lost forever.
         if (event['icmp_seq'] in this.transiting_events) {
           this.transiting_events[event['icmp_seq']]['arrived'] = true;
-          this.row.set_raw(json_event.data);
+          this.row.set_raw(event);
           this.row.add_event(event);
         } else {
           console.log(
@@ -785,8 +785,11 @@ class Row{
     this.tabulation.add_event(event);
   }
 
-  set_raw(raw_event) {
-    this.raw_pong_container.textContent = this.unresolved_address + ': ' + raw_event;
+  set_raw(event) {
+    this.raw_pong_container.textContent =
+      this.unresolved_address + ': received icmp_seq #' + event['icmp_seq'] +
+      ' from ' + event['from'] + ' at ' + event['timestamp'].toFixed(2) +
+      ' in ' + (event['rtt'] * 1000.0).toFixed(3) + 'ms';
   }
 
   redraw() {
