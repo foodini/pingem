@@ -142,7 +142,7 @@ const initial_size = parseInt(url_parameters.get('packet_size') || 64);
 const initial_interval = parseFloat(url_parameters.get('interval') || 1.0);
 
 class Epoch {
-  constructor(vertical_divisions, all_graph_max_rtt) {
+  constructor(vertical_divisions, global_max_rtt, update_largest_known_bucket_count) {
     this.buckets = Array(vertical_divisions).fill(0);
     this.samples = [];
     this.sorted = true;
@@ -151,18 +151,21 @@ class Epoch {
     this.count_all = 0;
     this.total_rtt = 0;
     this.vertical_divisions = vertical_divisions;
-    this.all_graph_max_rtt = all_graph_max_rtt;
+    this.global_max_rtt = global_max_rtt;
+    this.update_largest_known_bucket_count = update_largest_known_bucket_count;
   }
 
-  add(event) {
+  add_event(event) {
     this.count_all++;
     if(event['type'] == 'reply') {
       this.count_pong++;
       this.total_rtt += event['rtt'];
-      var bucket_id = Math.floor(this.buckets.length * event['rtt'] / (this.all_graph_max_rtt + 0.001));
+      var bucket_id = Math.floor(this.buckets.length * event['rtt'] / (this.global_max_rtt + 0.001));
       bucket_id = Math.min(bucket_id, this.vertical_divisions - 1);
       this.buckets[bucket_id]++;
-      layout_manager.update_largest_known_bucket_count(this.buckets[bucket_id]);
+      if (this.update_largest_known_bucket_count) {
+        layout_manager.update_largest_known_bucket_count(this.buckets[bucket_id]);
+      }
       this.samples.push(event['rtt']);
       this.sorted = false;
     } else {
@@ -221,48 +224,56 @@ class Epoch {
   }
 }
 
-class View {
-  constructor(events, start_timestamp, end_timestamp, appending, num_displayed_epochs,
-              vertical_divisions, max_rtt) {
+class Tabulation {
+  constructor(events, start_timestamp, end_timestamp, appending, num_horizontal_divisions,
+              vertical_divisions, global_max_rtt) {
     this.epochs = [];
-    this.num_displayed_epochs = num_displayed_epochs;
-    this.rebucket = true;
+    this.eon = new Epoch(vertical_divisions, global_max_rtt, false);
+    this.events = events;
+    this.num_horizontal_divisions = num_horizontal_divisions;
     this.timespan = end_timestamp - start_timestamp;
     this.start_timestamp = start_timestamp;
     this.end_timestamp = end_timestamp;
     this.appending = appending;
     this.vertical_divisions = vertical_divisions;
-    this.all_graph_max_rtt = max_rtt;
+    this.global_max_rtt = global_max_rtt;
 
     //TODO: rewrite this to binary search for the first and last icmp_seqs.
     for(var icmp_seq=0; icmp_seq < events.length; icmp_seq++) {
       if(events[icmp_seq]) {
         if(events[icmp_seq]['timestamp'] > start_timestamp &&
            events[icmp_seq]['timestamp'] < end_timestamp) {
-          this.add(events[icmp_seq]);
+          this.add_event(events[icmp_seq]);
         }
       }
     }
   }
 
-  add(event) {
+  add_event(event) {
+    layout_manager.set_potentially_oldest_timestamp(event['timestamp']);
+
     if(!this.appending && event['timestamp'] >= this.end_timestamp) {
       return;
     }
 
     var epoch_id =
-      Math.floor(this.num_displayed_epochs * (event['timestamp'] - this.start_timestamp) / this.timespan);
-    if(epoch_id >= this.num_displayed_epochs && this.appending) {
-      layout_manager.left_shift(this.num_displayed_epochs, event['timestamp']);
+      Math.floor(this.num_horizontal_divisions * (event['timestamp'] - this.start_timestamp) / this.timespan);
+    if(epoch_id >= this.num_horizontal_divisions && this.appending) {
+      layout_manager.left_shift(this.num_horizontal_divisions, event['timestamp']);
 
-      // This event will be queued in the rebucketed View that is about to be created.
+      // This event will be queued in the rebucketed Tabulation that is about to be created.
       return;
     }
 
     if(!this.epochs[epoch_id]) {
-      this.epochs[epoch_id] = new Epoch(this.vertical_divisions, this.all_graph_max_rtt);
+      this.epochs[epoch_id] = new Epoch(this.vertical_divisions, this.global_max_rtt, true);
     }
-    this.epochs[epoch_id].add(event);
+    this.epochs[epoch_id].add_event(event);
+    this.eon.add_event(event);
+
+    //this.events is actually owned by the row. Appending this event to the history gives us a 
+    //way to reconstruct the tabulation when the zoom or rtt scale change.
+    this.events[event['icmp_seq']] = event;
   }
 
   get_buckets(epoch_id) {
@@ -279,22 +290,18 @@ class View {
     return this.epochs[epoch_id].get_stats();
   }
 
+  get_summary() {
+    return this.eon;
+  }
+
   get_max_displayed_rtt() {
-    var this_graph_max_rtt = 0;
-    //TODO: can this be const, given that the call forces a sort? (This is just a shortcoming of my
-    //      lack of JS experience.
-    for(var epoch of this.epochs) {
-      // There are times (like your machine is sleeping, or JS at breakpoint) that this can happen:
-      if(epoch) {
-        const epoch_max_displayed_rtt = epoch.get_max_displayed_rtt();
-        if(epoch_max_displayed_rtt != undefined) {
-            //This catches a rare case where the most recent epoch has only a losses in it.
-          this_graph_max_rtt = Math.max(this_graph_max_rtt, epoch_max_displayed_rtt);
-        }
+    var max_rtt = 0.0;
+    for (const epoch of this.epochs) {
+      if (epoch) {
+        max_rtt = Math.max(max_rtt, epoch.get_max_displayed_rtt()); //TODO: get rid of "displayed"
       }
     }
-
-    return this_graph_max_rtt;
+    return max_rtt;
   }
 }
 
@@ -305,7 +312,7 @@ const horizontal_frequencies = [
 ];
 
 class RTTDisplay {
-  constructor(row_index, col_index, display_block_width, display_block_height) {
+  constructor(row_index, col_index, display_block_width, display_block_height, tabulation) {
     this.data_canvas = document.getElementById('data_canvas_'+row_index+'_'+col_index);
     this.label_canvas = document.getElementById('label_canvas_'+row_index+'_'+col_index);
     this.cursor_canvas = document.getElementById('cursor_canvas_'+row_index+'_'+col_index);
@@ -316,34 +323,21 @@ class RTTDisplay {
 
     this.display_block_width = display_block_width;
     this.display_block_height = display_block_height;
+    this.tabulation = tabulation;
 
     this.inset_width = 0;
     this.inset_height = 0;
   }
-}
 
-class Graph extends RTTDisplay {
-  constructor(row_index, col_index) {
-    super(row_index, col_index, 7, 5);
-    this.events = [];
-    this.prev_max_rtt = 1;
-    this.newest_timestamp = 0.0;
-    this.first_active_event = 0;
-
-    this.schedule_rebucket();
-
-    // I have chosen to have the pixel dimensions attached to individual graphs
-    // instead of to the layout manager because I may choose to have the heights
-    // independently resizeable.
-    this.display_block_width_center = Math.floor(this.display_block_width / 2) + 1;
-    this.vertical_label_divisions = 5.0;
+  set_tabulation(tabulation) {
+    this.tabulation = tabulation;
   }
 
   set_geometry(width, height) {
     this.width = width;
     this.height = height;
 
-    for(var canvas of [this.data_canvas, this.label_canvas, this.cursor_canvas]) {
+    for (var canvas of [this.data_canvas, this.label_canvas, this.cursor_canvas]) {
       canvas.style.width = this.width;
       canvas.style.height = this.height;
       canvas.width = this.width;
@@ -353,52 +347,54 @@ class Graph extends RTTDisplay {
     this.graph_container.width = this.width;
     this.graph_container.height = this.height;
 
-    this.num_displayed_epochs = Math.floor(this.graph_container.width / this.display_block_width);
-    var new_inset_width = this.num_displayed_epochs * this.display_block_width;
-    this.buckets_per_epoch = Math.floor(this.graph_container.height / this.display_block_height);
-    var new_inset_height = this.buckets_per_epoch * this.display_block_height;
+    this.num_horizontal_divisions = Math.floor(this.graph_container.width / this.display_block_width);
+    var new_inset_width = this.num_horizontal_divisions * this.display_block_width;
+    this.num_vertical_divisions = Math.floor(this.graph_container.height / this.display_block_height);
+    var new_inset_height = this.num_vertical_divisions * this.display_block_height;
 
-    this.left_offset = Math.floor((this.graph_container.width - new_inset_width)/2);
-    this.top_offset = Math.floor((this.graph_container.height - new_inset_height)/2);
+    this.left_offset = Math.floor((this.graph_container.width - new_inset_width) / 2);
+    this.top_offset = Math.floor((this.graph_container.height - new_inset_height) / 2);
 
-    if(new_inset_width != this.inset_width || new_inset_height != this.inset_height) {
+    if (new_inset_width != this.inset_width || new_inset_height != this.inset_height) {
       this.inset_width = new_inset_width;
       this.inset_height = new_inset_height;
-      this.schedule_rebucket();
     }
   }
 
-  add(event) {
-    let icmp_seq = event['icmp_seq'];
-    this.newest_timestamp = Math.max(event['timestamp'], this.newest_timestamp);
-    layout_manager.set_potentially_oldest_timestamp(this.newest_timestamp);
-
-    //There are a few situations we have to deal with here. First, what happens if the 'expected'
-    //packet comes first, then the thing actually arrives? Frankly, this should be a TODO:, to
-    //make the behavior of ultra-late, post-timeout packets configurable. The default (what is
-    //implemented here) is that once a packet's timeout has elapsed, it's lost even if it arrives.
-
-    // If the event already exists, either the actual packet arrived first and we should throw out
-    // the timeout packet we just received, or the timeout packet already arrived and we're
-    // receiving the (very late) pong from the echo endpoint. In this case, it's timed out ands
-    // dropped.
-    if(this.events[icmp_seq]) {
-      //There are two ways for this to happen. Either the packet arrived after our timeout limit,
-      //or the backend reported an 'expected' event after it had already delivered us a 'pong.'
-      //Either way, it would be weird.
-    } else {
-      this.events[icmp_seq] = event;
-
-      //Make sure this.view is valid and properly scaled:
-      this.rebucket_if_necessary();
-      this.view.add(event);
-    }
-
-    this.redraw();
+  get_horizontal_division_id(x) {
+    return Math.floor((x - this.left_offest) / this.display_block_width);
   }
 
-  schedule_rebucket() {
-    this.rebucket_required = true;
+  redraw() {
+    throw new Error('redraw must be implemented in derived classes');
+  }
+}
+
+class RTTSummary extends RTTDisplay {
+  constructor(row_index, col_index, tabulation) {
+    super(row_index, col_index, 1, 5, tabulation);
+  }
+
+  redraw() {
+
+  }
+}
+
+class RTTGraph extends RTTDisplay {
+  constructor(row_index, col_index, tabulation) {
+    super(row_index, col_index, 7, 5, tabulation);
+    this.newest_timestamp = 0.0;
+    this.first_active_event = 0;
+
+    // I have chosen to have the pixel dimensions attached to individual graphs
+    // instead of to the layout manager because I may choose to have the heights
+    // independently resizeable.
+    this.display_block_width_center = Math.floor(this.display_block_width / 2) + 1;
+    this.vertical_label_divisions = 5.0;
+  }
+
+  get_granularity() {
+    return [this.num_horizontal_divisions, this.num_vertical_divisions];
   }
 
   draw_line(x0, y0, x1, y1, width, color) {
@@ -410,25 +406,8 @@ class Graph extends RTTDisplay {
     this.data_context.stroke();
   }
 
-  rebucket_if_necessary() {
-    if(this.rebucket_required || !this.view) {
-      const max_rtt = layout_manager.get_max_displayed_rtt();
-      const [start_timestamp, end_timestamp, append] = layout_manager.get_zoom();
-      this.view = new View(this.events, start_timestamp, end_timestamp, append,
-                           this.num_displayed_epochs, this.buckets_per_epoch,
-                           max_rtt);
-      this.rebucket_required = false;
-    }
-  }
-
   redraw() {
-    const max_rtt = layout_manager.get_max_displayed_rtt();
-    if(max_rtt != this.prev_max_rtt) {
-      this.schedule_rebucket();
-    }
-    this.prev_max_rtt = max_rtt;
-
-    this.rebucket_if_necessary();
+    const global_max_rtt = layout_manager.get_global_max_rtt();
 
     const largest_known_bucket_count = layout_manager.get_largest_known_bucket_count();
 
@@ -438,8 +417,8 @@ class Graph extends RTTDisplay {
     this.data_context.clearRect(0, 0, width, height); // TODO: not really necessary?
     this.data_context.globalCompositeOperation='source_over';
 
-    for(var epoch_id=0; epoch_id<this.num_displayed_epochs; epoch_id++) {
-      const buckets = this.view.get_buckets(epoch_id);
+    for(var epoch_id=0; epoch_id<this.num_horizontal_divisions; epoch_id++) {
+      const buckets = this.tabulation.get_buckets(epoch_id);
       if(buckets != undefined) {
         var x =
             this.left_offset + (epoch_id * this.display_block_width) + this.display_block_width_center;
@@ -463,7 +442,7 @@ class Graph extends RTTDisplay {
           y1 += this.display_block_height;
         }
 
-        const stats = this.view.get_stats(epoch_id);
+        const stats = this.tabulation.get_stats(epoch_id);
         if(!stats) {
           debugger;
         }
@@ -476,7 +455,7 @@ class Graph extends RTTDisplay {
       }
     }
 
-    this.draw_labels(max_rtt);
+    this.draw_labels(global_max_rtt);
   }
 
   draw_labels(max_rtt) {
@@ -504,7 +483,7 @@ class Graph extends RTTDisplay {
       }
     }
     this.label_context.stroke();
-
+   
     const [min_timestamp, max_timestamp, _unused] = layout_manager.get_zoom();
     const timespan = max_timestamp - min_timestamp;
     var i;
@@ -571,24 +550,18 @@ class Graph extends RTTDisplay {
     }
     return retval + h + 'h';
   }
-
-  get_max_displayed_rtt() {
-    if(!this.view) {
-      return 0;
-    } else {
-      return this.view.get_max_displayed_rtt();
-    }
-  }
 }
 
 class ICMPConnector {
-  constructor(graph, unresolved_address, packet_size, interval) {
-    this.graph = graph;
+  constructor(row, unresolved_address, packet_size, interval) {
+    this.row = row;
     this.unresolved_address = unresolved_address;
     this.packet_size = packet_size;
     this.interval = interval;
     this.transiting_events = {};
     this.oldest_unresolved_icmp_seq = 1;
+
+    this.connector_id = Math.random();
 
     //TODO: make port configurable
     const stream_url =
@@ -601,11 +574,14 @@ class ICMPConnector {
       //      mixing timestamps from the two sources, ever if they SHOULD be running on the same
       //      machine and SHOULD be the same. Is this the right thing to do?
       event['timestamp'] = Date.now() / 1000.0;
-      if(event['type'] == 'ping') {
+      if (event['type'] == 'ping') {
+        //console.log('ping sent:', event['icmp_seq']);
         this.transiting_events[event['icmp_seq']] = event;
       } else {
         // It must be a 'reply'
-        this.graph.add(event);
+        //console.log('reply received:', event['icmp_seq']);
+        this.transiting_events[event['icmp_seq']]['arrived'] = true;
+        this.row.add_event(event);
       }
     }
     setTimeout(this.loss_reporter, 500, this); 
@@ -616,20 +592,25 @@ class ICMPConnector {
       const oldest_transiting_event = THIS.transiting_events[THIS.oldest_unresolved_icmp_seq];
       var expiry_time = oldest_transiting_event['timestamp'] + 3.0;
       const now = Date.now() / 1000.0;
-      if(expiry_time > now) {
+      if ('arrived' in oldest_transiting_event) {
+        //console.log('removing', oldest_transiting_event['icmp_seq'], 'from transiting_events');
+        delete THIS.transiting_events[THIS.oldest_unresolved_icmp_seq];
+        THIS.oldest_unresolved_icmp_seq++;
+      } else if(expiry_time > now) {
         break;
       } else {
+        //console.log('packet lost: ', oldest_transiting_event['icmp_seq']);
         const loss_event = {
           'type': 'loss',
           //I use the timestamp on the original ping message for a few reasons: it looks better
           //having losses reported in the very first epoch, but mostly because the timeout that
           //triggers this function does not fire when the window is hidden. If you use 'now' as the
-          //timestamp for the loss every lost packet is reported with the time the user forgegrounded
-          //the window.
+          //timestamp for the loss every lost packet is reported with the time the user 
+          //forgegrounded the window.
           'timestamp': oldest_transiting_event['timestamp'],
           'icmp_seq': oldest_transiting_event['icmp_seq']
         };
-        THIS.graph.add(loss_event);
+        THIS.row.get_tabulation().add_event(loss_event);
         delete THIS.transiting_events[THIS.oldest_unresolved_icmp_seq];
         THIS.oldest_unresolved_icmp_seq++;
       }
@@ -639,49 +620,127 @@ class ICMPConnector {
 }
 
 class Row{
-  constructor(index, unresolved_address, packet_size, interval) {
-    this.index = index;
+  constructor(row_index, unresolved_address, packet_size, interval) {
+    this.row_index = row_index;
     this.unresolved_address = unresolved_address;
     //NOTE that JS doesn't allow for DNS resolution. No matter, we only display
     //the unresolved name and whatever the user_icmp backend returns to us.
     this.packet_size = packet_size;
     this.interval = interval;
+    this.events = []
 
-    this.graph = undefined; // This gets set up in activate_table_row.
-    this.activate_table_row(index);
+    this.rtt_graph = undefined;
+    this.tabulation = undefined;
+    this.activate_table_row(row_index);
 
-    this.icmp_connector = new ICMPConnector(this.graph, unresolved_address, packet_size, interval);
-  }
+    this.icmp_connector = new ICMPConnector(this, unresolved_address, packet_size, interval);
 
-  get_graph() {
-    return this.graph;
-  }
-
-  activate_table_row(index) {
-    console.log('activating row ' + index);
-    document.getElementById('tr_raw'+index).style.display = 'table-row';
-    document.getElementById('tr_data'+index).style.display = 'table-row';
-
-    this.graph = new Graph(index, 0);
-
-    var canvas = document.getElementById('cursor_canvas_' + index + '_0');
-    canvas.addEventListener('wheel', function(event) {layout_manager.scroll(event, canvas.width);});
+    this.rebucket_required = true;
   }
 
   destructor() {
     console.log('deactivating row ' + index);
-    document.getElementById('tr_raw'+index).style.display = 'none';
-    document.getElementById('tr_data'+index).style.display = 'none';
+    document.getElementById('tr_raw' + index).style.display = 'none';
+    document.getElementById('tr_data' + index).style.display = 'none';
 
-    delete(this.graph);
+    delete (this.rtt_graph);
+    delete (this.stats_summary);
+  }
+
+  ensure_rtt_graph_exists() {
+    if (this.rtt_graph == undefined) {
+      this.rtt_graph = new RTTGraph(this.row_index, 0, this.tabulation);
+    }
+  }
+
+  ensure_stats_summary_exists() {
+    if (this.stats_summary == undefined) {
+      this.stats_summary = new RTTSummary(this.row_index, 1, this.tabulation);
+    }
+  }
+
+  ensure_tabulation_exists() {
+    if (this.tabulation == undefined || this.rebucket_required) {
+      const [start_timestamp, end_timestamp, appending] = layout_manager.get_zoom();
+      const [num_horizontal_divisions, vertical_divisions] = this.rtt_graph.get_granularity();
+      const global_max_rtt = layout_manager.get_global_max_rtt();
+
+      this.tabulation = new Tabulation(this.events, start_timestamp, end_timestamp, appending,
+        num_horizontal_divisions, vertical_divisions, global_max_rtt);
+      this.rtt_graph.set_tabulation(this.tabulation);
+      this.stats_summary.set_tabulation(this.tabulation);
+
+      this.rebucket_required = false;
+    }
+  }
+
+  rebucket() {
+    this.tabulation = undefined;
+    this.ensure_tabulation_exists();
+  }
+
+  rebucket_if_necessary() {
+    if (this.rebucket_required) {
+      this.rebucket();
+    }
+  }
+  
+  schedule_rebucket() {
+    this.rebucket_required = true;
+  }
+
+  get_rtt_graph() {
+    this.ensure_rtt_graph_exists();
+    return this.rtt_graph;
+  }
+
+  get_stats_summary() {
+    this.ensure_stats_summary_exists();
+    return this.stats_summary;
+  }
+
+  get_tabulation() {
+    this.ensure_tabulation_exists();
+    return this.tabulation;
+  }
+
+  activate_table_row(row_index, zoom) {
+    console.log('activating row ' + row_index);
+    document.getElementById('tr_raw' + row_index).style.display = 'table-row';
+    document.getElementById('tr_data' + row_index).style.display = 'table-row';
+
+    var canvas = document.getElementById('cursor_canvas_' + row_index + '_0');
+    canvas.addEventListener('wheel', function(event) {layout_manager.scroll(event, canvas.width);});
+  }
+
+  add_event(event) {
+    this.ensure_rtt_graph_exists();
+    this.ensure_tabulation_exists();
+    this.tabulation.add_event(event);
+  }
+
+  redraw() {
+    this.ensure_rtt_graph_exists();
+    this.ensure_tabulation_exists();
+    this.rebucket_if_necessary();
+    this.rtt_graph.redraw();
+    //this.stats_summary.redraw();
   }
 }
 
 class LayoutManager {
   constructor() {
     this.rows = new Array(MAX_ENDPOINTS);
+    const now = Date.now()/1000.0;
+    this.set_zoom(now, now + 60 * 2, true);
+    this.bucket_width_px = 7;
+    this.bucket_height_px = 5;
+    this.global_max_rtt = 0.1;
 
-    this.setup_endpoints();
+    //Set up the rows according to the initial layout specified in the url:
+    for (let index = 0; index < initial_endpoints.length; index++) {
+      this.rows[index] = new Row(index, initial_endpoints[index], initial_size, initial_interval);
+    }
 
     const resizeObserver = new ResizeObserver(entries => {
       layout_manager.on_resize();
@@ -693,12 +752,11 @@ class LayoutManager {
     this.height = window.innerHeight;
 
     this.oldest_timestamp = 1;
-    this.set_zoom(0, 60*5, true);
   }
 
-  set_zoom(view_start_timestamp, view_end_timestamp, appending) {
-    this.view_start_timestamp = view_start_timestamp;
-    this.view_end_timestamp = view_end_timestamp;
+  set_zoom(tabulation_start_timestamp, tabulation_end_timestamp, appending) {
+    this.tabulation_start_timestamp = tabulation_start_timestamp;
+    this.tabulation_end_timestamp = tabulation_end_timestamp;
     this.appending = appending;
 
     this.schedule_rebucket();
@@ -706,20 +764,21 @@ class LayoutManager {
 
   scroll(event, canvas_width) {
     const x_scale = event.x/canvas_width;
-    const old_timespan = this.view_end_timestamp - this.view_start_timestamp;
+    const old_timespan = this.tabulation_end_timestamp - this.tabulation_start_timestamp;
     // TODO: make this sensitive to velocity. My mouse won't give anything but +/-120
     if(event.deltaY > 0) {
       // Zoom out
       var dt = old_timespan * 0.1;
       //Prevent zooming out further than allowed:
       if(old_timespan + dt > this.oldest_timestamp) {
-        this.view_start_timestamp = 0;
-        this.view_end_timestamp = this.oldest_timestamp;
+        this.tabulation_start_timestamp = 0;
+        this.tabulation_end_timestamp = this.oldest_timestamp;
       } else {
-        this.view_start_timestamp -= (x_scale) * dt;
-        this.view_start_timestamp = Math.max(0, this.view_start_timestamp);
-        this.view_end_timestamp += (1.0 - x_scale) * dt;
-        this.view_end_timestamp = Math.min(this.oldest_timestamp, this.view_end_timestamp);
+        this.tabulation_start_timestamp -= (x_scale) * dt;
+        this.tabulation_start_timestamp = Math.max(0, this.tabulation_start_timestamp);
+        this.tabulation_end_timestamp += (1.0 - x_scale) * dt;
+        this.tabulation_end_timestamp = Math.min(
+          this.oldest_timestamp, this.tabulation_end_timestamp);
       }
     } else {
       // Zoom in
@@ -727,15 +786,19 @@ class LayoutManager {
       const max_dt = old_timespan - 60; //TODO: what should the max zoom-in be?
       dt = Math.min(dt, max_dt)
 
-      this.view_start_timestamp += (x_scale) * dt;
-      this.view_end_timestamp -= (1.0 - x_scale) * dt;
+      this.tabulation_start_timestamp += (x_scale) * dt;
+      this.tabulation_end_timestamp -= (1.0 - x_scale) * dt;
     }
     // there needs to be some slop in the comparison to account for threads delivering messages
     // in the middle of this process:
-    const appending = (this.view_end_timestamp >= this.oldest_timestamp - 0.5)
+    const appending = (this.tabulation_end_timestamp >= this.oldest_timestamp - 0.5)
 
-    this.set_zoom(this.view_start_timestamp, this.view_end_timestamp, appending);
+    this.set_zoom(this.tabulation_start_timestamp, this.tabulation_end_timestamp, appending);
     this.schedule_rebucket();
+  }
+
+  get_bucket_dimensions() {
+    return [this.bucket_width_px, this.bucket_height_px];
   }
 
   set_potentially_oldest_timestamp(timestamp) {
@@ -743,16 +806,19 @@ class LayoutManager {
   }
 
   schedule_rebucket() {
+    console.log('LayoutManager.schedule_rebucket()')
     for(var row of this.get_active_rows()) {
-      row.get_graph().schedule_rebucket();
+      row.schedule_rebucket();
     }
 
     this.largest_known_bucket_count = 1;
   }
 
   update_largest_known_bucket_count(current_bucket_count) {
-    this.largest_known_bucket_count =
-      Math.max(this.largest_known_bucket_count, current_bucket_count);
+    if (current_bucket_count > this.largest_known_bucket_count) {
+      console.log('this.largest_known_bucket_count', this.largest_known_bucket_count);
+      this.largest_known_bucket_count = current_bucket_count;
+    }
   }
 
   get_largest_known_bucket_count(current_bucket_count) {
@@ -761,28 +827,35 @@ class LayoutManager {
 
   left_shift(num_epochs_displayed, event_timestamp) {
     const epoch_timespan =
-        (this.view_end_timestamp - this.view_start_timestamp) / num_epochs_displayed;
+        (this.tabulation_end_timestamp - this.tabulation_start_timestamp) / num_epochs_displayed;
 
     const num_epochs_to_skip =
-        Math.ceil((event_timestamp - this.view_end_timestamp) / epoch_timespan);
+        Math.ceil((event_timestamp - this.tabulation_end_timestamp) / epoch_timespan);
 
-    this.view_end_timestamp += epoch_timespan * num_epochs_to_skip;
-    this.view_start_timestamp += epoch_timespan * num_epochs_to_skip;
+    this.tabulation_end_timestamp += epoch_timespan * num_epochs_to_skip;
+    this.tabulation_start_timestamp += epoch_timespan * num_epochs_to_skip;
 
     this.schedule_rebucket();
   }
 
   get_zoom() {
-    return [this.view_start_timestamp, this.view_end_timestamp, this.appending];
+    return [this.tabulation_start_timestamp, this.tabulation_end_timestamp, this.appending];
   }
 
-  get_max_displayed_rtt() {
+  get_global_max_rtt() {
+    return this.global_max_rtt;
+  }
+
+  update_global_max_rtt() {
     var max_rtt = 0.0;
     for(const row of this.get_active_rows()) {
-      max_rtt = Math.max(max_rtt, row.get_graph().get_max_displayed_rtt());
+      max_rtt = Math.max(max_rtt, row.get_tabulation().get_max_displayed_rtt());
     }
 
-    return max_rtt;
+    if (max_rtt != this.global_max_rtt) {
+      this.global_max_rtt = max_rtt;
+      this.schedule_rebucket();
+    }
   }
 
   get_active_rows() {
@@ -794,6 +867,7 @@ class LayoutManager {
   }
 
   on_resize() {
+    console.log('LayoutManager.on_resize()');
     this.width = window.innerWidth;
     this.height = window.innerHeight;
 
@@ -822,23 +896,27 @@ class LayoutManager {
 
     console.log('setting geometries to ' + this.data_width + ',' + this.data_height);
     for(var row of this.get_active_rows()) {
-      row.get_graph().set_geometry(this.data_width*2, this.data_height);
+      row.get_rtt_graph().set_geometry(this.data_width * 2, this.data_height);
+      row.get_stats_summary().set_geometry(this.data_width, this.data_height);
     }
 
     this.schedule_rebucket();
   }
 
-  setup_endpoints() {
-    for(let index=0; index<initial_endpoints.length; index++) {
-      this.rows[index] = new Row(index, initial_endpoints[index], initial_size, initial_interval);
+  // Note: since this is a timeout handler, "this" doesn't refer to layout_manager, so we
+  // use 'layout_manager' everywhere in place of "this". This is the same reason that ICMPManager
+  // uses THIS to refer to the correct manager instance.
+  redraw(THIS) {
+    THIS.update_global_max_rtt();
+    for (var row of THIS.get_active_rows()) {
+      row.redraw();
     }
-
-    this.on_resize();
+    setTimeout(THIS.redraw, 100, THIS);
   }
 }
 
 let layout_manager = new LayoutManager();
-
+setTimeout(layout_manager.redraw, 100, layout_manager);
 </script>
 </body>
 </html>

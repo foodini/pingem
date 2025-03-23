@@ -67,8 +67,8 @@ class Pong(ICMP):
 
   def __str__(self):
     dotted_ip = self.to_dotted_ip(self.source_ip)
-    return ('{' + f'"type":"reply", "from":"{dotted_ip}", "icmp_seq":"{self.icmp_seq}", ' +
-            f'"timestamp":"{self.timestamp}", "rtt":"{self.rtt}", "ttl":"{self.ttl}"' + '}')
+    return ('{' + f'"type":"reply", "from":"{dotted_ip}", "icmp_seq":{self.icmp_seq}, ' +
+            f'"timestamp":{self.timestamp}, "rtt":{self.rtt}, "ttl":{self.ttl}' + '}')
 
 #TODO: derive a Target type for handling traceroutes
 class Target():
