@@ -599,7 +599,7 @@ class ICMPConnector {
       } else if(expiry_time > now) {
         break;
       } else {
-        //console.log('packet lost: ', oldest_transiting_event['icmp_seq']);
+        console.log('packet lost: ', oldest_transiting_event['icmp_seq']);
         const loss_event = {
           'type': 'loss',
           //I use the timestamp on the original ping message for a few reasons: it looks better
@@ -816,7 +816,7 @@ class LayoutManager {
 
   update_largest_known_bucket_count(current_bucket_count) {
     if (current_bucket_count > this.largest_known_bucket_count) {
-      console.log('this.largest_known_bucket_count', this.largest_known_bucket_count);
+      //console.log('this.largest_known_bucket_count', this.largest_known_bucket_count);
       this.largest_known_bucket_count = current_bucket_count;
     }
   }
