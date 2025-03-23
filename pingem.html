@@ -210,11 +210,11 @@ class Epoch {
 
     if(this.count_pong > 0) {
       avg = this.total_rtt / this.count_pong;
-      _100 = this.buckets[this.buckets.length - 1];
-      _90 = this.buckets[Math.floor(this.buckets.length * 0.9)];
-      _50 = this.buckets[Math.floor(this.buckets.length * 0.5)];
-      _10 = this.buckets[Math.floor(this.buckets.length * 0.1)];
-      _0 = this.buckets[0];
+      _100 = this.samples[this.samples.length - 1];
+      _90 = this.samples[Math.floor(this.samples.length * 0.9)];
+      _50 = this.samples[Math.floor(this.samples.length * 0.5)];
+      _10 = this.samples[Math.floor(this.samples.length * 0.1)];
+      _0 = this.samples[0];
     }
     if(this.count_loss > 0) {
       loss = this.count_loss / this.count_all;
@@ -443,8 +443,12 @@ class RTTSummary extends RTTDisplay {
     const height = this.data_canvas.height;
     
     this.label_context.clearRect(0, 0, width, height);
-    const text = '' + (loss * 100.0).toFixed(1) + '% loss';
-    this.draw_text(text, width - 1, height - 1, 'right', 'bottom', '15px courier new', '#ffff60');
+    const loss_text = '' + (loss * 100.0).toFixed(1) + '% loss';
+    this.draw_text(loss_text, width - 1, 1, 'right', 'top', '15px courier new', '#ffff60');
+    const avg_rtt_text = '' + (avg * 1000.0).toFixed(1) + 'ms avg';
+    this.draw_text(avg_rtt_text, width - 1, 16, 'right', 'top', '15px courier new', '#ffff60');
+    const _90_text = '' + (_90 * 1000.0).toFixed(1) + 'ms 90%';
+    this.draw_text(_90_text, width - 1, 31, 'right', 'top', '15px courier new', '#ffff60');
   }
 }
 
