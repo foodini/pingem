@@ -8,7 +8,7 @@
 <title>pingem v1.0e-20</title>
 <style>
   body{background-color:black;color:white;overflow:hidden;}
-  .terminal{ display:inline-block; font-family:monospace; font-size:12px;}
+  .terminal{ display:inline-block; font-family:monospace; font-size:14px;}
   .status_row{display:grid;grid-template-columns:24px 1fr 25%;}
   .graph_row{display:grid;grid-template-columns:35% 40% 25%;}
   .graph_container { position:relative; border:1px solid grey; padding:2px; }
@@ -31,7 +31,7 @@
 <!-- ======================================== -->
 <tr id=tr_raw0 class=tr_raw style='display:none;'>
   <td colspan=3>
-    <button class=close_button>X</button> <div class='terminal cell' id=raw_pong0></div>
+    <button class=close_button>X</button> <div class='terminal' id=raw_pong0></div>
   </td>
 </tr>
 <tr id=tr_data0 style='display:none;'>
@@ -49,7 +49,7 @@
 <!-- ======================================== -->
 <tr id=tr_raw1 class=tr_raw style='display:none;'>
   <td colspan=3>
-    <button class=close_button>X</button> <div class='terminal cell' id=raw_pong1></div>
+    <button class=close_button>X</button> <div class='terminal' id=raw_pong1></div>
   </td>
 </tr>
 <tr id=tr_data1 style='display:none;'>
@@ -67,7 +67,7 @@
 <!-- ======================================== -->
 <tr id=tr_raw2 class=tr_raw style='display:none;'>
   <td colspan=3>
-    <button class=close_button>X</button> <div class='terminal cell' id=raw_pong2></div>
+    <button class=close_button>X</button> <div class='terminal' id=raw_pong2></div>
   </td>
 </tr>
 <tr id=tr_data2 style='display:none;'>
@@ -85,7 +85,7 @@
 <!-- ======================================== -->
 <tr id=tr_raw3 class=tr_raw style='display:none;'>
   <td colspan=3>
-    <button class=close_button>X</button> <div class='terminal cell' id=raw_pong3></div>
+    <button class=close_button>X</button> <div class='terminal' id=raw_pong3></div>
   </td>
 </tr>
 <tr id=tr_data3 style='display:none;'>
@@ -103,7 +103,7 @@
 <!-- ======================================== -->
 <tr id=tr_raw4 class=tr_raw style='display:none;'>
   <td colspan=3>
-    <button class=close_button>X</button> <div class='terminal cell' id=raw_pong4></div>
+    <button class=close_button>X</button> <div class='terminal' id=raw_pong4></div>
   </td>
 </tr>
 <tr id=tr_data4 style='display:none;'>
@@ -283,6 +283,10 @@ class Tabulation {
     return this.epochs[epoch_id].get_buckets();
   }
 
+  get_eon() {
+    return this.eon;
+  }
+
   get_stats(epoch_id) {
     if(!this.epochs[epoch_id]) {
       return undefined;
@@ -365,6 +369,17 @@ class RTTDisplay {
     return Math.floor((x - this.left_offest) / this.display_block_width);
   }
 
+  // Yes, I know this is slow and inefficient but until it becomes a problem, I'm not
+  // writing the code to batch lines.
+  draw_line(x0, y0, x1, y1, width, color) {
+    this.data_context.lineWidth = width;
+    this.data_context.strokeStyle = color;
+    this.data_context.beginPath();
+    this.data_context.moveTo(x0, y0);
+    this.data_context.lineTo(x1, y1);
+    this.data_context.stroke();
+  }
+
   redraw() {
     throw new Error('redraw must be implemented in derived classes');
   }
@@ -376,7 +391,30 @@ class RTTSummary extends RTTDisplay {
   }
 
   redraw() {
+    const global_max_rtt = layout_manager.get_global_max_rtt();
+    const width = this.data_canvas.width;
+    const height = this.data_canvas.height;
 
+    this.data_context.clearRect(0, 0, width, height);
+    this.data_context.globalCompositeOperation = 'source_over';
+
+    const eon = this.tabulation.get_eon();
+    const buckets = eon.get_buckets();
+    const largest_bucket_count = Math.max(...buckets);
+    for (var index = 0; index < buckets.length; index++) {
+      const y = this.data_canvas.height - 1 -
+        (this.top_offset + index * this.display_block_height + Math.floor(this.display_block_height / 2));
+      const ratio = buckets[index] / largest_bucket_count;
+      const intensity = ratio * 0.6 + 0.4;
+      const b = Math.floor(intensity * 255);
+      const rg = Math.floor(intensity * intensity * 255);
+      const color = `rgb(${rg},${rg},${b})`;
+      var line_length = Math.ceil(ratio * (width - 1));
+      if (line_length > 0 && line_length < 5) {
+        line_length = 5;
+      }
+      this.draw_line(0, y, line_length, y, this.display_block_height, color);
+    }
   }
 }
 
@@ -397,24 +435,15 @@ class RTTGraph extends RTTDisplay {
     return [this.num_horizontal_divisions, this.num_vertical_divisions];
   }
 
-  draw_line(x0, y0, x1, y1, width, color) {
-    this.data_context.lineWidth = width;
-    this.data_context.strokeStyle = color;
-    this.data_context.beginPath();
-    this.data_context.moveTo(x0, y0);
-    this.data_context.lineTo(x1, y1);
-    this.data_context.stroke();
-  }
-
   redraw() {
     const global_max_rtt = layout_manager.get_global_max_rtt();
 
     const largest_known_bucket_count = layout_manager.get_largest_known_bucket_count();
 
-    let width = this.data_canvas.width;
-    let height = this.data_canvas.height;
+    const width = this.data_canvas.width;
+    const height = this.data_canvas.height;
 
-    this.data_context.clearRect(0, 0, width, height); // TODO: not really necessary?
+    this.data_context.clearRect(0, 0, width, height);
     this.data_context.globalCompositeOperation='source_over';
 
     for(var epoch_id=0; epoch_id<this.num_horizontal_divisions; epoch_id++) {
@@ -582,6 +611,7 @@ class ICMPConnector {
         // It's possible that the packet arrived after we'd assumed it lost forever.
         if (event['icmp_seq'] in this.transiting_events) {
           this.transiting_events[event['icmp_seq']]['arrived'] = true;
+          this.row.set_raw(json_event.data);
           this.row.add_event(event);
         } else {
           console.log(
@@ -713,6 +743,7 @@ class Row{
     console.log('activating row ' + row_index);
     document.getElementById('tr_raw' + row_index).style.display = 'table-row';
     document.getElementById('tr_data' + row_index).style.display = 'table-row';
+    this.raw_pong_container = document.getElementById('raw_pong' + row_index);
 
     var canvas = document.getElementById('cursor_canvas_' + row_index + '_0');
     canvas.addEventListener('wheel', function(event) {layout_manager.scroll(event, canvas.width);});
@@ -724,12 +755,16 @@ class Row{
     this.tabulation.add_event(event);
   }
 
+  set_raw(raw_event) {
+    this.raw_pong_container.textContent = this.unresolved_address + ': ' + raw_event;
+  }
+
   redraw() {
     this.ensure_rtt_graph_exists();
     this.ensure_tabulation_exists();
     this.rebucket_if_necessary();
     this.rtt_graph.redraw();
-    //this.stats_summary.redraw();
+    this.stats_summary.redraw();
   }
 }
 
@@ -894,13 +929,13 @@ class LayoutManager {
     var inner_width = this.width
       -10 /* rooom for left and right borders. TODO: remove magic numbers */
       ;
-    this.data_width = (inner_width / 3 ) /* Three columns. TODO: magic number. */
+    this.data_width = (inner_width / 4 ) /* Three columns. TODO: magic number. */
       - 5 /* room for borders between columns */
       ;
 
     console.log('setting geometries to ' + this.data_width + ',' + this.data_height);
     for(var row of this.get_active_rows()) {
-      row.get_rtt_graph().set_geometry(this.data_width * 2, this.data_height);
+      row.get_rtt_graph().set_geometry(this.data_width * 3, this.data_height);
       row.get_stats_summary().set_geometry(this.data_width, this.data_height);
     }
 
