@@ -380,6 +380,19 @@ class RTTDisplay {
     this.data_context.stroke();
   }
 
+  //draws text with a black outline border to provide contrast against a background.
+  draw_text(text, x, y, textAlign, textBaseline, font, color) {
+    this.label_context.beginPath();
+    this.label_context.strokeStyle = '#000000';
+    this.label_context.fillStyle = color;
+    this.label_context.font = font;
+    this.label_context.textBaseline = textBaseline;
+    this.label_context.textAlign = textAlign;
+    this.label_context.strokeText(text, x, y);
+    this.label_context.fillText(text, x, y);
+    this.label_context.stroke();
+  }
+
   redraw() {
     throw new Error('redraw must be implemented in derived classes');
   }
@@ -415,6 +428,23 @@ class RTTSummary extends RTTDisplay {
       }
       this.draw_line(0, y, line_length, y, this.display_block_height, color);
     }
+
+    this.draw_labels();
+  }
+
+  draw_labels() {
+    const eon = this.tabulation.get_eon();
+    const stats = eon.get_stats();
+    if (stats == undefined) {
+      return;
+    }
+    const [loss, avg, _100, _90, _50, _10, _0] = stats;
+    const width = this.data_canvas.width;
+    const height = this.data_canvas.height;
+    
+    this.label_context.clearRect(0, 0, width, height);
+    const text = '' + (loss * 100.0).toFixed(1) + '% loss';
+    this.draw_text(text, width - 1, height - 1, 'right', 'bottom', '15px courier new', '#ffff60');
   }
 }
 
