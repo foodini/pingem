@@ -177,6 +177,8 @@ class Epoch {
     return this.buckets;
   }
 
+  // TODO: Doing this every frame for the entire view could get very, very expensive. The frequency at
+  // which we're willing to do the sort should be inversely proportional to the number of samples.
   ensure_samples_sorted() {
     if(!this.sorted) {
       this.samples.sort();
@@ -201,6 +203,7 @@ class Epoch {
 
     // TODO: make the percentiles configurable.
     var avg = undefined;
+    const count = this.samples.length;
     var _100 = undefined;
     var _90 = undefined;
     var _50 = undefined;
@@ -220,7 +223,7 @@ class Epoch {
       loss = this.count_loss / this.count_all;
     }
 
-    return [loss, avg, _100, _90, _50, _10, _0];
+    return [loss, avg, count, _100, _90, _50, _10, _0];
   }
 }
 
@@ -302,7 +305,10 @@ class Tabulation {
     var max_rtt = 0.0;
     for (const epoch of this.epochs) {
       if (epoch) {
-        max_rtt = Math.max(max_rtt, epoch.get_max_displayed_rtt()); //TODO: get rid of "displayed"
+        const epoch_max_rtt = epoch.get_max_displayed_rtt();
+        if (epoch_max_rtt != undefined) {
+          max_rtt = Math.max(max_rtt, epoch_max_rtt);
+        }
       }
     }
     return max_rtt;
@@ -382,7 +388,7 @@ class RTTDisplay {
 
   //draws text with a black outline border to provide contrast against a background.
   draw_text(text, x, y, textAlign, textBaseline, font, color) {
-    this.label_context.beginPath();
+    //this.label_context.beginPath();
     this.label_context.strokeStyle = '#000000';
     this.label_context.fillStyle = color;
     this.label_context.font = font;
@@ -390,7 +396,7 @@ class RTTDisplay {
     this.label_context.textAlign = textAlign;
     this.label_context.strokeText(text, x, y);
     this.label_context.fillText(text, x, y);
-    this.label_context.stroke();
+    //this.label_context.stroke();
   }
 
   redraw() {
@@ -438,17 +444,21 @@ class RTTSummary extends RTTDisplay {
     if (stats == undefined) {
       return;
     }
-    const [loss, avg, _100, _90, _50, _10, _0] = stats;
+    const [loss, avg, count, _100, _90, _50, _10, _0] = stats;
     const width = this.data_canvas.width;
     const height = this.data_canvas.height;
     
     this.label_context.clearRect(0, 0, width, height);
+    this.label_context.beginPath();
     const loss_text = '' + (loss * 100.0).toFixed(1) + '% loss';
     this.draw_text(loss_text, width - 1, 1, 'right', 'top', '15px courier new', '#ffff60');
+    const count_text = '' + count + ' pkts';
+    this.draw_text(count_text, width - 1, 16, 'right', 'top', '15px courier new', '#ffff60');
     const avg_rtt_text = '' + (avg * 1000.0).toFixed(1) + 'ms avg';
-    this.draw_text(avg_rtt_text, width - 1, 16, 'right', 'top', '15px courier new', '#ffff60');
+    this.draw_text(avg_rtt_text, width - 1, 31, 'right', 'top', '15px courier new', '#ffff60');
     const _90_text = '' + (_90 * 1000.0).toFixed(1) + 'ms 90%';
-    this.draw_text(_90_text, width - 1, 31, 'right', 'top', '15px courier new', '#ffff60');
+    this.draw_text(_90_text, width - 1, 46, 'right', 'top', '15px courier new', '#ffff60');
+    this.label_context.stroke();
   }
 }
 
@@ -509,7 +519,7 @@ class RTTGraph extends RTTDisplay {
         if(!stats) {
           debugger;
         }
-        const [loss, avg, _100, _90, _50, _10, _0] = stats;
+        const [loss, avg, count, _100, _90, _50, _10, _0] = stats;
         if(loss) {
           var loss_y0 = this.inset_height + this.top_offset; // TODO: -1?
           var loss_y1 = loss_y0 - loss * this.inset_height;
@@ -527,20 +537,17 @@ class RTTGraph extends RTTDisplay {
 
     this.label_context.clearRect(0, 0, width, height);
     this.label_context.lineWidth = 1;
-    this.label_context.strokeStyle= '#ff606050';
-    this.label_context.fillStyle= '#ff6060ff';
     this.data_context.globalCompositeOperation='source-over';
     this.label_context.beginPath();
-    this.label_context.font = '15px courier new';
-    this.label_context.textBaseline = 'top';
     var inc = 1.0/this.vertical_label_divisions;
     for(var k=0.0; k<1.0-(inc/2.0); k+=inc) {
       var y = Math.floor(k*height);
-      this.label_context.textAlign = 'left';
-      this.label_context.fillText('' + ((1-k)*max_rtt*1000).toFixed(1) + 'ms', 0, y+1);
-      this.label_context.textAlign = 'right';
-      this.label_context.fillText('' + ((1-k)*100).toFixed(1) + '%', width-1, y+1);
+      const latency_text = '' + ((1 - k) * max_rtt * 1000).toFixed(1) + 'ms';
+      this.draw_text(latency_text, 0, y + 1, 'left', 'top', '15px courier new', '#ff6060');
+      const loss_text = '' + ((1 - k) * 100).toFixed(1) + '%';
+      this.draw_text(loss_text, width-1, y+1, 'right', 'top', '15px courier new', '#ff6060');
       if(k>0.0) {
+        this.label_context.strokeStyle = '#ff606050';
         this.label_context.moveTo(0, y);
         this.label_context.lineTo(width-1, y);
       }
@@ -568,16 +575,15 @@ class RTTGraph extends RTTDisplay {
     } else {
       t0 = Math.floor(max_timestamp/dt)*dt;
     }
-    //this.label_context.strokeStyle = '#4040ff';
-    //this.label_context.fillStyle = '#4040ff';
-    this.label_context.textAlign='right';
-    this.label_context.textBaseline='bottom';
     this.label_context.beginPath();
     for(var t=t0; t>min_timestamp; t-=dt) {
-      const x = Math.floor((t-min_timestamp)/(max_timestamp-min_timestamp) * width);
+      const x = Math.floor((t - min_timestamp) / (max_timestamp - min_timestamp) * width);
+      const delta_t_text = this.seconds_to_str(t - layout_manager.oldest_timestamp);
+      this.draw_text(delta_t_text, x, height - 1, 'right', 'bottom', '15px courier new', '#ff6060');
+
+      this.label_context.strokeStyle = '#ff606050';
       this.label_context.moveTo(x, 0);
       this.label_context.lineTo(x, height-1);
-      this.label_context.fillText(this.seconds_to_str(t-layout_manager.oldest_timestamp), x, height-1);
     }
     this.label_context.stroke();
   }
@@ -926,6 +932,11 @@ class LayoutManager {
     var max_rtt = 0.0;
     for(const row of this.get_active_rows()) {
       max_rtt = Math.max(max_rtt, row.get_tabulation().get_max_displayed_rtt());
+    }
+    if (max_rtt == 0.0) {
+      // If there's no reply data in the tabulation, this will be the result. If that's the case,
+      // setting max_rtt to 100ms will at least show a sane scale on the screen instead of NaN
+      max_rtt = 0.1;
     }
 
     if (max_rtt != this.global_max_rtt) {
