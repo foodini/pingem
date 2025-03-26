@@ -255,6 +255,11 @@ class Tabulation {
   add_event(event) {
     layout_manager.set_potentially_oldest_timestamp(event['timestamp']);
 
+    //this.events is actually owned by the row. Appending this event to the history gives us a 
+    //way to reconstruct the tabulation when the zoom or rtt scale change. It's necessary to do
+    //it now so all incoming replies are recorded, even if they're not part of the current view.
+    this.events[event['icmp_seq']] = event;
+
     if(!this.appending && event['timestamp'] >= this.end_timestamp) {
       return;
     }
@@ -273,10 +278,6 @@ class Tabulation {
     }
     this.epochs[epoch_id].add_event(event);
     this.eon.add_event(event);
-
-    //this.events is actually owned by the row. Appending this event to the history gives us a 
-    //way to reconstruct the tabulation when the zoom or rtt scale change.
-    this.events[event['icmp_seq']] = event;
   }
 
   get_buckets(epoch_id) {
