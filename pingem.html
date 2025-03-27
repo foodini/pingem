@@ -372,8 +372,50 @@ class RTTDisplay {
     }
   }
 
+  get_position_within_inset(x, y) {
+    var x_out, y_out;
+
+    if (this.label_canvas == undefined) {
+      return [undefined, undefined];
+    }
+    const rect = this.label_canvas.getBoundingClientRect();
+    x = x - rect.left;
+    y = y - rect.top;
+
+    if (this.left_offset == undefined || this.inset_width == undefined) {
+      x_out = undefined;
+    } else {
+      x_out = (x - this.left_offset) / this.inset_width;
+    }
+    if (this.top_offset == undefined || this.inset_height == undefined) {
+      y_out = undefined;
+    } else {
+      y_out = (y - this.top_offset) / this.inset_height;
+    }
+
+    return [x_out, y_out];
+  }
+
   get_horizontal_division_id(x) {
     return Math.floor((x - this.left_offest) / this.display_block_width);
+  }
+
+  get_mouse_timestamp(mouse_x) {
+    const tab = this.tabulation;
+    if (tab == undefined || mouse_x == undefined) {
+      return undefined;
+    }
+
+    return tab.start_timestamp + mouse_x * (tab.end_timestamp - tab.start_timestamp);
+  }
+
+  get_mouse_latency(mouse_relative_y) {
+    const tab = this.tabulation;
+    if (tab == undefined || mouse_relative_y == undefined) {
+      return undefined;
+    }
+
+    return (1.0 - mouse_relative_y) * layout_manager.get_global_max_rtt();
   }
 
   // Yes, I know this is slow and inefficient but until it becomes a problem, I'm not
@@ -407,7 +449,7 @@ class RTTDisplay {
 
 class RTTSummary extends RTTDisplay {
   constructor(row_index, col_index, tabulation) {
-    super(row_index, col_index, 1, 5, tabulation);
+    super(row_index, col_index, 1, 3, tabulation);
   }
 
   redraw() {
@@ -460,12 +502,19 @@ class RTTSummary extends RTTDisplay {
     const _90_text = '' + (_90 * 1000.0).toFixed(1) + 'ms 90%';
     this.draw_text(_90_text, width - 1, 46, 'right', 'top', '15px courier new', '#ffff60');
     this.label_context.stroke();
+
+    const [mouse_x, mouse_relative_y] = layout_manager.get_mouse_pos();
+    const mouse_latency = this.get_mouse_latency(mouse_relative_y);
+    if (mouse_latency != undefined) {
+      const y_pos = Math.floor(mouse_relative_y * height);
+      this.draw_line(0, y_pos, width - 1, y_pos, 1, '#ff0000');
+    }
   }
 }
 
 class RTTGraph extends RTTDisplay {
   constructor(row_index, col_index, tabulation) {
-    super(row_index, col_index, 7, 5, tabulation);
+    super(row_index, col_index, 7, 3, tabulation);
     this.newest_timestamp = 0.0;
     this.first_active_event = 0;
 
@@ -587,6 +636,33 @@ class RTTGraph extends RTTDisplay {
       this.label_context.lineTo(x, height-1);
     }
     this.label_context.stroke();
+
+    const [mouse_x, mouse_relative_y] = layout_manager.get_mouse_pos();
+    const mouse_timestamp = this.get_mouse_timestamp(mouse_x);
+    const mouse_latency = this.get_mouse_latency(mouse_relative_y);
+    if (mouse_latency != undefined) {
+      const x_pos = Math.floor(mouse_x * width);
+      const y_pos = Math.floor(mouse_relative_y * height);
+      this.draw_line(0, y_pos, width - 1, y_pos, 1, '#ff0000');
+      this.draw_line(x_pos, 0, x_pos, height - 1, 1, '#ff0000');
+      const textAlign = x_pos < (width / 2) ? 'left' : 'right';
+      const textBaseline = y_pos < 20 ? 'top' : 'bottom';
+      var mouseover_text = '' + (mouse_latency * 1000).toFixed(1) + 'ms ';
+      if (mouse_timestamp != undefined) {
+        // I really should have been converting to milliseconds right from the beginning.
+        const date = new Date(mouse_timestamp * 1000);
+        const year = String(date.getFullYear());
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hour = String(date.getHours()).padStart(2, '0');
+        const minute = String(date.getMinutes()).padStart(2, '0');
+        const second = String(date.getSeconds()).padStart(2, '0');
+        mouseover_text += year + '.' + month + '.' + day + ' ' + hour + ':' + minute + ':' + second;
+      }
+
+      this.draw_text(mouseover_text, x_pos, y_pos, textAlign, textBaseline,
+        '15px courier new', '#ffffff');
+    }
   }
 
   seconds_to_str(t) {
@@ -787,7 +863,21 @@ class Row{
     this.raw_pong_container = document.getElementById('raw_pong' + row_index);
 
     var canvas = document.getElementById('cursor_canvas_' + row_index + '_0');
-    canvas.addEventListener('wheel', function(event) {layout_manager.scroll(event, canvas.width);});
+    canvas.addEventListener('wheel', function (event) { layout_manager.scroll(event, canvas.width); });
+    const THIS = this;
+    canvas.addEventListener('mousemove',
+      function (event) {
+        if (THIS.rtt_graph) {
+          const [mouse_x, mouse_relative_y] = THIS.rtt_graph.get_position_within_inset(event.x, event.y);
+          layout_manager.mousemove(mouse_x, mouse_relative_y);
+        }
+      }
+    )
+    canvas.addEventListener('mouseleave',
+      function (event) {
+        layout_manager.mousemove(undefined, undefined);
+      }
+    )
   }
 
   add_event(event) {
@@ -820,6 +910,8 @@ class LayoutManager {
     this.bucket_width_px = 7;
     this.bucket_height_px = 5;
     this.global_max_rtt = 0.1;
+    this.mouse_x = undefined;
+    this.mouse_relative_y = undefined;
 
     //Set up the rows according to the initial layout specified in the url:
     for (let index = 0; index < initial_endpoints.length; index++) {
@@ -881,12 +973,30 @@ class LayoutManager {
     this.schedule_rebucket();
   }
 
+  mousemove(mouse_x, mouse_relative_y) {
+    if (mouse_x < 0.0 || mouse_x > 1.0 || mouse_relative_y < 0.0 || mouse_relative_y > 1.0) {
+      this.mouse_x = undefined;
+      this.mouse_relative_y = undefined;
+    } else {
+      this.mouse_x = mouse_x;
+      this.mouse_relative_y = mouse_relative_y;
+    }
+  }
+
+  get_mouse_pos() {
+    return [this.mouse_x, this.mouse_relative_y];
+  }
+
   get_bucket_dimensions() {
     return [this.bucket_width_px, this.bucket_height_px];
   }
 
   set_potentially_oldest_timestamp(timestamp) {
     this.oldest_timestamp = Math.max(timestamp, this.oldest_timestamp);
+  }
+
+  get_oldest_timestamp() {
+    return this.oldest_timestamp;
   }
 
   schedule_rebucket() {
