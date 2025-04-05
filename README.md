@@ -1,9 +1,9 @@
 ## pingem
 # Installing/running
 Run user_icmp2.py as root. Yes, I know. But as long as ICMP is still treated
-like it's the 1980 - and icmp echo/reply is lumped in with all the control
+like it's the 1980s - and icmp echo/reply is lumped in with all the control
 packet types - we're pretty much screwed when it comes to getting a deep look
-at icmp traffic.
+at icmp traffic. **THIS NEEDS TO BE REWITTEN IN C**
 
 From there, just open the .html in a browser on the same machine as user_icmp2.
 The url accepts some parameters; 
@@ -15,16 +15,6 @@ So:
   file:///home/me/pingem/pingem.html?endpoints=192.168.1.1,interval=0.1
 ...will give you a track of network behavior to your local router... or
 whatever.
-
-# Issues
-There are a lot of 'em at the moment. See the TODO lists in the source files
-for the exhaustive list. The ones that are major usability blockers are;
-* It seems that user_icmp is getting stalled every 15 seconds or so on my
-hardware. I need to compare user_icmp data to tcpdump. I suspect that I need
-to respond to incoming packets more quickly. That'll be a fun night of socket
-options wrangling.
-* Labels on graphs (and raw output) are currently broken.
-* Need to be able to add/remove rows and change ping intervals.
 
 # Purpose
 I frequently leave ping running in a terminal so I have something to visually
@@ -55,12 +45,11 @@ in linux, OSX, or Windows: you have no idea when a packet was sent.
 
 This seems like a minor issue, but it led to an issue that couldn't be solved
 or worked around. The ping binaries will only tell you when a packet arrives.
-It will not tell you where it is in terms of what has been sent. If you
-experience a long bout of packet loss, you can only guess which ICMP sequences'
-ids have been sent. You would guess that, given the interpacket interval I,
-packet number X would be sent at time X*I. This is not the case. Each packet is
-sent after the previous packet is successfully queued and AT LEAST I seconds
-have elapsed.
+If you experience a long bout of packet loss, you can only guess which ICMP
+sequences' ids have been sent. You might assume that, given the interpacket
+interval I, packet number X would be sent at time X*I. This is not the case.
+Each packet is sent after the previous packet is successfully queued and AT
+LEAST I seconds have elapsed.
 
 This means that you can end up in a situation were the graph displays a long
 bout of packet loss, but packets that were thought to be lost in the distant
@@ -81,20 +70,24 @@ sent.
 
 There are a couple options here.
 
-Option #1 is to wrap tcpdump and continue using a ping subprocess. A setuid
-root executable that reports just the icmp packets that are associated with the
-user's sessions is attractive, but suffers from a fatal flaw. When the network
-we're trying to reach is unavailable, no packet is sent and we're back to
-guessing when icmp_seq # n was supposed to have been sent. 
+Option #1 is to wrap tcpdump with a minimal setuid process and continue using a
+ping subprocess. A setuid root executable that reports just the icmp packets
+that are associated with the user's sessions is attractive, but suffers from a
+fatal flaw. When the network we're trying to reach is unavailable, no packet is
+sent and we're back to guessing when icmp_seq # n was supposed to have been
+sent. 
 
 Option #2 is to provide a service - also setuid - that the user can connect to
 that will send and receive icmp traffic on the user's behalf. This allows us a
 number of advantages. First, we can pack a wider icmp_seq in our custom-built
-icmp packets. Second, even a total network outage will still track icmp traffic
-that _should_ have been sent, even if it wasn't. (When there's "no route to
-host", the ping executable stops sending packets.) Basically, a network outage
-should look the same to the user as any other string of losses. If this service
-includes a connection method that can be reached by a browser running
-javascript, the project reduces down to only two parts instead of the original
-three. Hence, the rewrite.
+icmp packets. This is very convenient when you are sending millions of packets
+and don't want to compensate for the default 16-bit ids. Second, even during a
+total network outage we will still track icmp traffic that _should_ have been
+sent, even if it wasn't. (When there's "no route to host", the ping executable
+stops sending packets.) Basically, a network outage should look the same to the
+user as any other string of losses. If this service includes a connection
+method that can be reached by a browser running javascript, the project reduces
+down to only two parts instead of the original three.
+
+Hence, the rewrite. I went with option #2.
 
