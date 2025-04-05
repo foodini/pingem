@@ -1,4 +1,5 @@
 ## pingem
+![Current Screenshot](/screenshot.png)
 # Installing/running
 Run user_icmp2.py as root. Yes, I know. But as long as ICMP is still treated
 like it's the 1980s - and icmp echo/reply is lumped in with all the control
@@ -6,7 +7,7 @@ packet types - we're pretty much screwed when it comes to getting a deep look
 at icmp traffic. **THIS NEEDS TO BE REWITTEN IN C**
 
 From there, just open the .html in a browser on the same machine as user_icmp2.
-The url accepts some parameters; 
+The url accepts some parameters;
 * endpoints is a comma-separated list of ping targets.
 * interval is the time delay between icmp packets to each endpoint.
 * packet_size is pretty easy to figure out. (The minimum is currently around 32)
@@ -37,7 +38,7 @@ something that had a minimal barrier to installation. Expecting someone to have
 Node on their machine is a bit of a stretch. Python and a web browser are far
 more realistic expectations.
 
-# What's With user_icmp.py? 
+# What's With user_icmp.py?
 
 Calling /usr/bin/ping for ICMP is fairly simple and gets us 99% of what we need,
 but there's an edge case that precludes using any of the ping binaries available
@@ -75,7 +76,7 @@ ping subprocess. A setuid root executable that reports just the icmp packets
 that are associated with the user's sessions is attractive, but suffers from a
 fatal flaw. When the network we're trying to reach is unavailable, no packet is
 sent and we're back to guessing when icmp_seq # n was supposed to have been
-sent. 
+sent.
 
 Option #2 is to provide a service - also setuid - that the user can connect to
 that will send and receive icmp traffic on the user's behalf. This allows us a
