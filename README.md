@@ -1,4 +1,7 @@
 ## pingem
+...and this is how I discovered that my neighbors are flooding the wifi bands so
+badly that it's severely impacting my service. It's across all bands, so I'm in
+the process of dragging cable everywhere.
 ![Current Screenshot](/screenshot.png)
 # Installing/running
 Run user_icmp2.py as root. Yes, I know. But as long as ICMP is still treated
