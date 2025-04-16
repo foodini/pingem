@@ -1,13 +1,15 @@
-## pingem
-...and this is how I discovered that my neighbors are flooding the wifi bands so
-badly that it's severely impacting my service. It's across all bands, so I'm in
-the process of dragging cable everywhere.
-![Current Screenshot](/screenshot.png)
+## pingem ...and this is how I discovered that my neighbors are flooding the
+wifi bands so badly that it's severely impacting my service. It's across all
+bands, so I'm in the process of dragging cable everywhere.  ![Current
+Screenshot](/screenshot.png)
 # Installing/running
 Run user_icmp2.py as root. Yes, I know. But as long as ICMP is still treated
 like it's the 1980s - and icmp echo/reply is lumped in with all the control
 packet types - we're pretty much screwed when it comes to getting a deep look
-at icmp traffic. **THIS NEEDS TO BE REWITTEN IN C**
+at icmp traffic. **THIS NEEDS TO BE REWITTEN IN C** I've recently been pulled
+into a hardware interface effort for a friend's Unreal Engine project, so it
+may be a while before I get to this rather crucial step. If you're really
+jonesing for the rewrite, ping me and maybe I'll get my priorities reordered.
 
 From there, just open the .html in a browser on the same machine as user_icmp2.
 The url accepts some parameters;
@@ -27,30 +29,32 @@ glance at a running ping will tell me if something has gone wrong with my net
 connection or if the issue is on the other end. These are the kinds of paranoid
 habits you develop when you're on AT&T "broadband."
 
-I wanted something a little more long-term, though. Something that would show me
-a longer-span history of my connection state. I created a tool called pingstats,
-that did just this for me, but it suffered from the requirement that it run in
-iTerm2. I love iTerm2, it's amazing, but it's Mac only. I wanted a solution that
-would make it possible to put out a presentable visual and simplify the process
-of providing a UI.
+I wanted something a little more long-term, though. Something that would show
+me a longer-span history of my connection state. I created a tool called
+pingstats that did just this for me, but it suffered from the restriction that
+it could only run in iTerm2. I love iTerm2, it's amazing, but it's Mac only. I
+wanted a solution that would make it possible to put out a presentable visual
+and simplify the process of providing a UI.
 
 The natural choice for UI work is JavaScript - even though I'm not really a fan.
 Unfortunately, JS has no ability to send ICMP packets, nor can it invoke Ping.
 Maybe this would be possible with NodeJS, but I really wanted this tool to be
 something that had a minimal barrier to installation. Expecting someone to have
 Node on their machine is a bit of a stretch. Python and a web browser are far
-more realistic expectations.
+more realistic expectations. (Come to think of it - maybe the "minimal barrier"
+requirement suggests that I should leave user_icmp in Python? Ugh. Decisions.)
 
 # What's With user_icmp.py?
 
-Calling /usr/bin/ping for ICMP is fairly simple and gets us 99% of what we need,
-but there's an edge case that precludes using any of the ping binaries available
-in linux, OSX, or Windows: you have no idea when a packet was sent.
+Calling /usr/bin/ping for ICMP is fairly simple and gets us 99% of what we
+need, but there's an edge case that precludes using any of the ping binaries
+available in linux, OSX, or Windows. It all comes down to the fact that with
+ping, you have no idea when a packet was sent.
 
 This seems like a minor issue, but it led to an issue that couldn't be solved
 or worked around. The ping binaries will only tell you when a packet arrives.
 If you experience a long bout of packet loss, you can only guess which ICMP
-sequences' ids have been sent. You might assume that, given the interpacket
+sequence ids have been sent. You might assume that, given the interpacket
 interval I, packet number X would be sent at time X*I. This is not the case.
 Each packet is sent after the previous packet is successfully queued and AT
 LEAST I seconds have elapsed.
@@ -58,14 +62,15 @@ LEAST I seconds have elapsed.
 This means that you can end up in a situation were the graph displays a long
 bout of packet loss, but packets that were thought to be lost in the distant
 past start arriving in the present. The UI can go back to historic metrics and
-remove the reported lost packet, but this leads to a couple other issues. First,
-what happens if an epoch (a column in the history) has its last packet removed?
-Do we display that as 100% packet loss or as no data? I would opt to mark it as
-100% loss, but there are times that this is not ideal. Secondly, what happens if
-we lose 0-1000, then receive 1001, and lose 1002? We've already marked 1002 as
-lost at some point in the distant past and it won't be re-recorded as lost in
-the current epoch. When 1001 arrives, do we mark everything after it as in
-transit and start over with determining what has timed out and what hasn't?
+remove the reported lost packet, but this leads to a couple other issues.
+First, what happens if an epoch (a column in the history) has its last packet
+removed?  Do we display that as 100% packet loss or as no data? I would opt to
+mark it as 100% loss, but there are times that this is not ideal. Secondly,
+what happens if we lose icmp_sequence 0-1000, then receive 1001, and lose 1002?
+We've already marked 1002 as lost at some point in the distant past and it
+won't be re-recorded as lost in the current epoch. When 1001 arrives, do we
+mark everything after it as in transit and start over with determining what has
+timed out and what hasn't?
 
 It's a lot of silly heuristics and guesswork that end up making for some very
 convoluted edge cases in the code that make for lots of cross-interaction and
@@ -93,5 +98,8 @@ user as any other string of losses. If this service includes a connection
 method that can be reached by a browser running javascript, the project reduces
 down to only two parts instead of the original three.
 
-Hence, the rewrite. I went with option #2.
+Hence, the rewrite. I went with option #2. user_icmp.py is obviously not able to
+be setuid without some uncomfortable wrangling that is dangerous from a security
+perspective, so for the moment it must be run as sudo root. When it's rewritten
+in C (or C++), it'll be possible to make it setuid.
 
