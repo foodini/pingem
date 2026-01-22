@@ -18,7 +18,7 @@ The url accepts some parameters;
 * packet_size is pretty easy to figure out. (The minimum is currently around 32)
 
 So:
-  file:///home/me/pingem/pingem.html?endpoints=192.168.1.1,interval=0.1
+  file:///home/me/pingem/pingem.html?endpoints=192.168.1.1,8.8.8.8&interval=0.1
 ...will give you a track of network behavior to your local router... or
 whatever.
 
