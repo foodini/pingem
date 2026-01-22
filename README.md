@@ -36,13 +36,14 @@ it could only run in iTerm2. I love iTerm2, it's amazing, but it's Mac only. I
 wanted a solution that would make it possible to put out a presentable visual
 and simplify the process of providing a UI.
 
-The natural choice for UI work is JavaScript - even though I'm not really a fan.
-Unfortunately, JS has no ability to send ICMP packets, nor can it invoke Ping.
-Maybe this would be possible with NodeJS, but I really wanted this tool to be
-something that had a minimal barrier to installation. Expecting someone to have
-Node on their machine is a bit of a stretch. Python and a web browser are far
-more realistic expectations. (Come to think of it - maybe the "minimal barrier"
-requirement suggests that I should leave user_icmp in Python? Ugh. Decisions.)
+The natural choice for UI work is JavaScript - even though I'm not really a
+fan.  Unfortunately, JS has no ability to send ICMP packets, nor can it invoke
+Ping.  ~~Maybe this would be possible with NodeJS~~ (it's not), but I really
+wanted this tool to be something that had a minimal barrier to installation.
+Expecting someone to have Node on their machine is a bit of a stretch. Python
+and a web browser are far more realistic expectations. (Come to think of it -
+maybe the "minimal barrier" requirement suggests that I should leave user_icmp
+in Python? Ugh. Decisions.)
 
 # What's With user_icmp.py?
 
