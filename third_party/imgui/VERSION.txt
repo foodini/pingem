@@ -1,0 +1,2 @@
+Dear ImGui v1.91.9 (https://github.com/ocornut/imgui), MIT license (LICENSE.txt).
+Only the core files and the SDL2 + OpenGL3 backends are vendored. Unmodified.

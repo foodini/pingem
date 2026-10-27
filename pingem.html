@@ -716,10 +716,12 @@ class ICMPConnector {
     this.event_source = new EventSource(stream_url);
     this.event_source.onmessage = (json_event) => {
       const event = JSON.parse(json_event.data);
-      //TODO: I overwrite the timestamp that was given by the user_icmp connector? I don't like
-      //      mixing timestamps from the two sources, ever if they SHOULD be running on the same
-      //      machine and SHOULD be the same. Is this the right thing to do?
-      event['timestamp'] = Date.now() / 1000.0;
+      // The daemon is the only clock: 'timestamp' is the wall-clock time it sent the ping or
+      // received the reply. loss_reporter still compares those against Date.now(), which is fine
+      // as long as the daemon and the browser are on the same machine (they must be: the daemon
+      // only listens on 127.0.0.1).
+      // Number(): user_icmp2.py sent the ping timestamp as a quoted string.
+      event['timestamp'] = Number(event['timestamp']);
       if (event['type'] == 'ping') {
         //console.log('ping sent:', event['icmp_seq']);
         this.transiting_events[event['icmp_seq']] = event;
