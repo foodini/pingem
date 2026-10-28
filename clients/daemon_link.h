@@ -22,6 +22,7 @@ struct TargetSpec {
   std::string host;
   double interval;
   int packet_size;
+  int flows;            // 0 = no flows
 };
 
 enum LinkEventType {
@@ -29,8 +30,8 @@ enum LinkEventType {
   LINK_DISCONNECTED,
   LINK_ADDED,         // id, address
   LINK_ERROR,         // id (-1 if not about a target), text
-  LINK_PING,          // id, seq, time
-  LINK_REPLY          // id, seq, time, rtt, ttl, address (= who replied)
+  LINK_PING,          // id, seq, time, flow
+  LINK_REPLY          // id, seq, time, rtt, ttl, address (= who replied), flow
 };
 
 struct LinkEvent {
@@ -40,6 +41,7 @@ struct LinkEvent {
   double time;
   double rtt;
   int ttl;
+  int flow;           // -1 if the target doesn't use flows
   std::string address;
   std::string text;
 };

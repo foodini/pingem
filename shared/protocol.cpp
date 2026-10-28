@@ -160,10 +160,15 @@ std::string format_hello() {
   return std::string(line);
 }
 
-std::string format_add(int id, const std::string& host, double interval, int size) {
+std::string format_add(int id, const std::string& host, double interval, int size, int flows) {
   char line[MAX_LINE_LENGTH];
-  snprintf(line, sizeof(line), "add %d %s interval=%g size=%d\n", id, host.c_str(), interval,
-           size);
+  if (flows > 0) {
+    snprintf(line, sizeof(line), "add %d %s interval=%g size=%d flows=%d\n", id, host.c_str(),
+             interval, size, flows);
+  } else {
+    snprintf(line, sizeof(line), "add %d %s interval=%g size=%d\n", id, host.c_str(), interval,
+             size);
+  }
   return std::string(line);
 }
 
@@ -202,16 +207,26 @@ std::string format_error(int id, const std::string& text) {
   return std::string(prefix) + clean + "\n";
 }
 
-std::string format_ping(int id, uint64_t seq, double send_time) {
+// " flow=N" or nothing.
+static std::string flow_field(int flow) {
+  if (flow < 0) {
+    return std::string();
+  }
+  char field[32];
+  snprintf(field, sizeof(field), " flow=%d", flow);
+  return std::string(field);
+}
+
+std::string format_ping(int id, uint64_t seq, double send_time, int flow) {
   char line[128];
-  snprintf(line, sizeof(line), "ping %d seq=%" PRIu64 " t=%.6f\n", id, seq, send_time);
-  return std::string(line);
+  snprintf(line, sizeof(line), "ping %d seq=%" PRIu64 " t=%.6f", id, seq, send_time);
+  return std::string(line) + flow_field(flow) + "\n";
 }
 
 std::string format_reply(int id, uint64_t seq, double receive_time, double rtt, int ttl,
-                         const std::string& from) {
+                         const std::string& from, int flow) {
   char line[256];
-  snprintf(line, sizeof(line), "reply %d seq=%" PRIu64 " t=%.6f rtt=%.9f ttl=%d from=%s\n", id,
-           seq, receive_time, rtt, ttl, from.c_str());
-  return std::string(line);
+  snprintf(line, sizeof(line), "reply %d seq=%" PRIu64 " t=%.6f rtt=%.9f ttl=%d from=%s", id, seq,
+           receive_time, rtt, ttl, from.c_str());
+  return std::string(line) + flow_field(flow) + "\n";
 }

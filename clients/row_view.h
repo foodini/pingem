@@ -32,8 +32,9 @@ const int CELL_HEIGHT = 3;
 // Things every row needs to agree on, computed once per frame.
 struct FrameContext {
   ViewWindow window;
+  bool by_flow;                // summary split per flow, selection highlighting on
   double now;                  // wall clock, seconds
-  int largest_cell;           // across ALL rows, so colors are comparable
+  int largest_cell;            // across ALL rows, so colors are comparable
   bool crosshair_visible;
   double crosshair_x;          // 0..1 across the graph inset
   double crosshair_y;          // 0..1 down the graph inset
@@ -56,12 +57,21 @@ public:
 
   // Per frame, in this order: tabulate() every row, then work out the
   // largest cell across all rows, then update_texture() and draw() each row.
-  void tabulate(const TargetHistory& history, const ViewWindow& window);
+  void tabulate(const TargetHistory& history, const ViewWindow& window, bool by_flow);
   void update_texture(const FrameContext& frame);
   void draw(ImDrawList* draw_list, const TargetHistory& history, const RowLayout& layout,
             const FrameContext& frame) const;
 
   const Tabulation& get_tabulation() const;
+
+  // "By flow" mode: the summary column is split into one histogram strip per
+  // flow. Returns which strip `point` is over, or -1.
+  int flow_strip_at(const RowLayout& layout, ImVec2 point, int flow_count) const;
+  // Clicking a strip selects that flow; clicking it again clears the
+  // selection. The selected flow is drawn at full brightness, the rest dimmed.
+  void toggle_flow(int flow);
+  // One line about a flow, for the tooltip over its strip.
+  void describe_flow(int flow, char* out, size_t out_size) const;
 
 private:
   void draw_graph(ImDrawList* draw_list, const RowLayout& layout,
@@ -75,6 +85,8 @@ private:
   int texture_columns;
   int texture_rows;
   int colored_with_largest;    // largest_cell used for the current texture
+  int colored_with_highlight;  // selected flow the texture was colored for (-1 none)
+  int selected_flow;           // -1 = none
   std::vector<uint32_t> pixels;
 };
 

@@ -41,6 +41,8 @@ MAX_PACKET_SIZE = 8192
 MAGIC_STRING = bytes('867-5309', 'utf-8')
 MAGIC_STRING_LEN = len(MAGIC_STRING)
 
+process_start_time = time.time()
+
 class ICMP():
   def to_dotted_ip(self, long):
     return f'{(long>>24) % 256}.{(long>>16) % 256}.{(long>>8) % 256}.{(long) % 256}'
@@ -170,6 +172,7 @@ class SocketManager():
             f'{MAGIC_STRING_LEN}sHQd' ,
             response[:self.all_header_size]
         )
+        #if magic_string == MAGIC_STRING and time.time() < process_start_time + 15:
         if magic_string == MAGIC_STRING:
           return Pong(connection_id, icmp_seq, timestamp, now-timestamp, source_addr, ttl)
         else:

@@ -1,9 +1,10 @@
 #include "target_history.h"
 
 #include <stdio.h>
+#include <string.h>
 
 TargetHistory::TargetHistory(const std::string& name)
-    : name(name), session_base(0), oldest_pending(0), version(0) {
+    : name(name), session_base(0), oldest_pending(0), version(0), flow_count(0) {
   status = name + ": waiting for user_icmp...";
 }
 
@@ -16,7 +17,10 @@ void TargetHistory::on_error(const std::string& text) {
   status = name + ": " + text;
 }
 
-void TargetHistory::on_ping(uint64_t seq, double send_time) {
+void TargetHistory::on_ping(uint64_t seq, double send_time, int flow) {
+  if (flow >= flow_count) {
+    flow_count = flow + 1;
+  }
   size_t index = session_base + (size_t)(seq - 1);
   // Pings arrive in order over a stream socket, so index == samples.size()
   // always. If that ever weren't true, fill any gap with ABANDONED rather
@@ -26,6 +30,7 @@ void TargetHistory::on_ping(uint64_t seq, double send_time) {
     filler.send_time = send_time;
     filler.rtt = 0.0f;
     filler.state = SAMPLE_ABANDONED;
+    filler.flow = -1;
     samples.push_back(filler);
   }
   if (samples.size() > index) {
@@ -35,6 +40,7 @@ void TargetHistory::on_ping(uint64_t seq, double send_time) {
   sample.send_time = send_time;
   sample.rtt = 0.0f;
   sample.state = SAMPLE_PENDING;
+  sample.flow = (int8_t)flow;
   samples.push_back(sample);
 }
 
@@ -58,6 +64,11 @@ void TargetHistory::on_reply(uint64_t seq, double receive_time, double rtt, int 
   char line[512];
   snprintf(line, sizeof(line), "%s: received icmp_seq #%llu from %s at %.2f in %.3fms ttl=%d",
            name.c_str(), (unsigned long long)seq, from.c_str(), receive_time, rtt * 1000.0, ttl);
+  if (sample.flow >= 0) {
+    char flow_text[32];
+    snprintf(flow_text, sizeof(flow_text), " flow=%d", sample.flow);
+    strncat(line, flow_text, sizeof(line) - strlen(line) - 1);
+  }
   status = line;
 }
 
@@ -117,4 +128,8 @@ const std::string& TargetHistory::get_status() const {
 
 uint64_t TargetHistory::get_version() const {
   return version;
+}
+
+int TargetHistory::get_flow_count() const {
+  return flow_count;
 }

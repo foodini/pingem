@@ -90,6 +90,7 @@ private:
     std::string name;
     double interval;
     int packet_size;
+    int flows;                   // 0 = no flows (free checksum)
     ResolveRequest* request;
   };
 
@@ -104,6 +105,10 @@ private:
     uint64_t next_sequence;      // first packet is 1
     double interval;
     int packet_size;
+    // Flows: ping n uses flow (n-1) % flows, and every packet in flow f is
+    // sent with ICMP checksum flow_checksums[f]. flows == 0: free checksum.
+    int flows;
+    std::vector<uint16_t> flow_checksums;
     double next_send_time;       // monotonic
     int last_send_error;         // errno of the previous send, to avoid log spam
   };
@@ -115,7 +120,7 @@ private:
 
   // Step 2: DNS and target lifetime.
   bool request_target(Client* client, int client_target_id, const std::string& name,
-                      double interval, int packet_size, std::string* error);
+                      double interval, int packet_size, int flows, std::string* error);
   void check_resolutions();
   void start_target(PendingAdd* pending, Client* client, const struct in_addr& address);
   void destroy_target(Target* target);
@@ -127,9 +132,9 @@ private:
   void drain_icmp_socket();
 
   // Events to clients, in whichever format the client speaks.
-  void emit_ping(Target* target, uint64_t sequence, double send_time);
+  void emit_ping(Target* target, uint64_t sequence, double send_time, int flow);
   void emit_reply(Target* target, uint64_t sequence, double receive_time, double rtt, int ttl,
-                  const std::string& from);
+                  const std::string& from, int flow);
 
   // Step 6: clients.
   void accept_clients(int listen_fd, ClientKind kind);

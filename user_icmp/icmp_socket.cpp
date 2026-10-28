@@ -12,6 +12,10 @@
 
 static const char MAGIC[] = "867-5309";
 static const int MAGIC_LENGTH = 8;
+// Two payload bytes, right after the magic, adjusted so the ICMP checksum
+// comes out to a chosen value. See send_echo().
+static const int FUDGE_OFFSET = 8 + MAGIC_LENGTH;   // 16-bit aligned
+static const int FUDGE_LENGTH = 2;
 static const int ICMP_HEADER_LENGTH = 8;
 static const uint8_t ICMP_TYPE_ECHO_REPLY = 0;
 static const uint8_t ICMP_TYPE_ECHO_REQUEST = 8;
@@ -70,8 +74,15 @@ uint16_t IcmpSocket::checksum(const unsigned char* data, int length) {
   return (uint16_t)(~sum & 0xffff);
 }
 
+// Ones-complement addition of two 16-bit values, with end-around carry.
+static uint16_t ones_add(uint16_t a, uint16_t b) {
+  uint32_t sum = (uint32_t)a + (uint32_t)b;
+  sum = (sum & 0xffff) + (sum >> 16);
+  return (uint16_t)sum;
+}
+
 int IcmpSocket::send_echo(const struct in_addr& destination, uint16_t identifier,
-                          uint16_t sequence, int packet_size) {
+                          uint16_t sequence, int packet_size, int fixed_checksum) {
   if (packet_size < MIN_PACKET_SIZE) {
     packet_size = MIN_PACKET_SIZE;
   }
@@ -89,12 +100,34 @@ int IcmpSocket::send_echo(const struct in_addr& destination, uint16_t identifier
   p[6] = (unsigned char)(sequence >> 8);
   p[7] = (unsigned char)(sequence & 0xff);
   memcpy(p + ICMP_HEADER_LENGTH, MAGIC, MAGIC_LENGTH);
-  memset(p + ICMP_HEADER_LENGTH + MAGIC_LENGTH, 'x',
-         packet_size - ICMP_HEADER_LENGTH - MAGIC_LENGTH);
+  p[FUDGE_OFFSET] = 0;
+  p[FUDGE_OFFSET + 1] = 0;
+  memset(p + FUDGE_OFFSET + FUDGE_LENGTH, 'x', packet_size - FUDGE_OFFSET - FUDGE_LENGTH);
 
-  uint16_t sum = checksum(p, packet_size);
-  p[2] = (unsigned char)(sum >> 8);
-  p[3] = (unsigned char)(sum & 0xff);
+  if (fixed_checksum < 0) {
+    // Free checksum: whatever the contents add up to. It changes with every
+    // sequence number, so load balancers may scatter these packets across
+    // parallel paths.
+    uint16_t sum = checksum(p, packet_size);
+    p[2] = (unsigned char)(sum >> 8);
+    p[3] = (unsigned char)(sum & 0xff);
+  } else {
+    // Fixed checksum (Paris traceroute's trick, but done in the payload so the
+    // identifier and sequence number stay free). The receiver's check is
+    // that all 16-bit words of the message, including the checksum field,
+    // add up (ones-complement) to 0xffff. With the checksum field set to T
+    // and the fudge word F still zero, the other words sum to S. So choose
+    //     F = ~(S + T)
+    // and S + T + F = 0xffff: the packet is valid AND its checksum is T, no
+    // matter what the identifier and sequence number are.
+    uint16_t target = (uint16_t)fixed_checksum;
+    uint16_t sum_of_rest = (uint16_t)~checksum(p, packet_size);   // S
+    uint16_t fudge = (uint16_t)~ones_add(sum_of_rest, target);
+    p[2] = (unsigned char)(target >> 8);
+    p[3] = (unsigned char)(target & 0xff);
+    p[FUDGE_OFFSET] = (unsigned char)(fudge >> 8);
+    p[FUDGE_OFFSET + 1] = (unsigned char)(fudge & 0xff);
+  }
 
   struct sockaddr_in to;
   memset(&to, 0, sizeof(to));

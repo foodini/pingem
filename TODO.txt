@@ -1,0 +1,8 @@
+* Maybe have both the time and the time offset ("22:30:30" and
+  "-1m30s"?)
+* Have a mode where you can simply state a final endpoint and pingem will
+  choose the midpoints to metric. Anyone (particularly gamers) who wanted to
+  see how their network connections were behaving (maybe they feel they need to
+  change providers) would love to know where the blame for their latency and
+  loss issues goes.
+

@@ -16,6 +16,8 @@
 //   +------+------+------+------+
 //   | "867-5309" (8 bytes)      |   magic, only a cheap sanity filter
 //   +---------------------------+
+//   |    fudge    |                   2 bytes that pin the checksum (flows)
+//   +-------------+-------------+
 //   | 'x' padding ...           |   up to packet_size total
 //   +---------------------------+
 //
@@ -32,8 +34,9 @@
 #include <netinet/in.h>
 #include <stdint.h>
 
-// The smallest ICMP message we will build: 8-byte header + 8-byte magic.
-const int MIN_PACKET_SIZE = 16;
+// The smallest ICMP message we will build: 8-byte header + 8-byte magic +
+// 2 fudge bytes.
+const int MIN_PACKET_SIZE = 18;
 // The largest. Anything above the path MTU gets fragmented, which is legal but
 // rarely what anyone wants to measure.
 const int MAX_PACKET_SIZE = 8192;
@@ -59,8 +62,14 @@ public:
 
   // Sends one echo request. Returns 0 on success, otherwise the errno from
   // sendto() (e.g. ENETUNREACH when the network is down).
+  //
+  // fixed_checksum: -1 lets the checksum fall where it may. 0..65535 forces
+  // the ICMP checksum to that exact value (using the fudge bytes), which is
+  // what makes a "flow": per-flow load balancers hash on the checksum, so
+  // every packet with the same checksum takes the same path. Avoid 0x0000
+  // and 0xffff, which are the same number in ones-complement arithmetic.
   int send_echo(const struct in_addr& destination, uint16_t identifier,
-                uint16_t sequence, int packet_size);
+                uint16_t sequence, int packet_size, int fixed_checksum);
 
   // Non-blocking. Returns true and fills *reply if an echo reply with our
   // magic was waiting; returns false when there is nothing (more) to read.

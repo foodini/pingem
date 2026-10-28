@@ -1,6 +1,6 @@
 // main.cpp - pingem, the graphical client.
 //
-//     pingem [--interval S] [--size N] [--font FILE] host [host...]
+//     pingem [--interval S] [--size N] [--flows K] [--font FILE] host [host...]
 //
 // Talks to user_icmp over its Unix socket (start that first, as root), and
 // draws one row per host: status line, RTT heatmap with loss bars, and an RTT
@@ -18,7 +18,9 @@
 //
 // Controls: mouse wheel over a graph zooms around the mouse. Left-click and
 // drag scrubs through time: the epoch you grabbed stays under the mouse.
-// End (or F) returns to following "now". Q or Escape quits.
+// End (or F) returns to following "now". The "View" button (or V) switches
+// the summary column between "combined" and "by flow"; in "by flow", clicking
+// a flow's histogram highlights that flow in the graph. Q or Escape quits.
 
 #include "daemon_link.h"
 #include "row_view.h"
@@ -66,6 +68,8 @@ static void usage(const char* program) {
           "usage: %s [options] host [host...]\n"
           "  --interval S   seconds between pings to each host (default 1)\n"
           "  --size N       ICMP packet size in bytes (default 64)\n"
+          "  --flows K      spread each host's pings over K fixed-checksum flows\n"
+          "                 (default 8; 0 = let the checksum vary, like plain ping)\n"
           "  --font FILE    TTF font (default %s)\n"
           "With no hosts: 8.8.8.8 amazon.com speedtest.net\n",
           program, DEFAULT_FONT);
@@ -106,7 +110,7 @@ static void apply_event(const LinkEvent& event, std::vector<TargetHistory*>& his
       history->on_error(event.text);
       break;
     case LINK_PING:
-      history->on_ping(event.seq, event.time);
+      history->on_ping(event.seq, event.time, event.flow);
       break;
     case LINK_REPLY:
       history->on_reply(event.seq, event.time, event.rtt, event.ttl, event.address);
@@ -119,12 +123,14 @@ static void apply_event(const LinkEvent& event, std::vector<TargetHistory*>& his
 int main(int argc, char* argv[]) {
   double interval = 1.0;
   int packet_size = 64;
+  int flows = 8;
   const char* font_path = DEFAULT_FONT;
 
   static struct option long_options[] = {
       {"interval", required_argument, NULL, 'i'},
       {"size", required_argument, NULL, 's'},
       {"font", required_argument, NULL, 'f'},
+      {"flows", required_argument, NULL, 'k'},
       {"help", no_argument, NULL, 'h'},
       {NULL, 0, NULL, 0}};
   while (true) {
@@ -138,6 +144,9 @@ int main(int argc, char* argv[]) {
         break;
       case 's':
         packet_size = atoi(optarg);
+        break;
+      case 'k':
+        flows = atoi(optarg);
         break;
       case 'f':
         font_path = optarg;
@@ -172,6 +181,7 @@ int main(int argc, char* argv[]) {
     spec.host = hosts[i];
     spec.interval = interval;
     spec.packet_size = packet_size;
+    spec.flows = flows;
     specs.push_back(spec);
     histories.push_back(new TargetHistory(hosts[i]));
     rows.push_back(new RowView());
@@ -225,6 +235,8 @@ int main(int argc, char* argv[]) {
   // Scrubbing: while the left button is held after a click on a graph, the
   // time that was under the mouse at the click stays under the mouse.
   bool dragging = false;
+  // "combined" (one summary histogram per row) or "by flow" (one per flow).
+  bool by_flow = false;
   double drag_anchor_time = 0.0;
   while (!done) {
     // ---- 1. Events. Sleep up to 50 ms waiting for one: the data only
@@ -242,6 +254,8 @@ int main(int argc, char* argv[]) {
           done = true;
         } else if (key == SDLK_END || key == SDLK_f) {
           timeline.follow();
+        } else if (key == SDLK_v) {
+          by_flow = !by_flow;
         }
       }
       have_event = SDL_PollEvent(&event) != 0;
@@ -318,6 +332,7 @@ int main(int argc, char* argv[]) {
     // ---- 5. Crosshair and zoom: is the mouse over any row's cell grid? ----
     FrameContext frame;
     frame.window = view;
+    frame.by_flow = by_flow;
     frame.now = now;
     frame.crosshair_visible = false;
     frame.crosshair_x = 0.0;
@@ -345,7 +360,10 @@ int main(int argc, char* argv[]) {
       double anchor_time = view.start + frame.crosshair_x * (view.end - view.start);
       timeline.zoom(anchor_time, frame.crosshair_x, io.MouseWheel, now, earliest);
     }
-    if (frame.crosshair_visible && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    // Clicks on ImGui widgets (the View button) belong to them, not to us.
+    bool mouse_is_ours = !io.WantCaptureMouse;
+    if (frame.crosshair_visible && mouse_is_ours &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
       dragging = true;
       drag_anchor_time = view.start + frame.crosshair_x * (view.end - view.start);
     }
@@ -361,11 +379,54 @@ int main(int argc, char* argv[]) {
       }
     }
 
+    // In "by flow" mode: hovering over a flow's histogram explains it, and
+    // clicking it toggles the highlight.
+    if (by_flow && mouse_is_ours && !dragging) {
+      for (int i = 0; i < row_count; i++) {
+        int flow = rows[i]->flow_strip_at(layouts[i], io.MousePos,
+                                          histories[i]->get_flow_count());
+        if (flow < 0) {
+          continue;
+        }
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+          rows[i]->toggle_flow(flow);
+        }
+        char description[256];
+        rows[i]->describe_flow(flow, description, sizeof(description));
+        ImGui::SetTooltip("%s", description);
+      }
+    }
+
+    // The View button, top right. A real button (not just the V key) so the
+    // mode can be discovered; its tooltip names the shortcut.
+    const char* view_label = by_flow ? "View: by flow" : "View: combined";
+    float button_width = ImGui::CalcTextSize("View: combined").x + 12;
+    // Small enough to sit in the first row's status line, clear of the graph.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 1));
+    ImGui::SetNextWindowPos(ImVec2(display_width - margin - button_width - 12, margin));
+    ImGui::SetNextWindowBgAlpha(0.0f);
+    ImGui::Begin("controls", NULL,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove);
+    if (ImGui::Button(view_label, ImVec2(button_width, 0))) {
+      by_flow = !by_flow;
+      frame.by_flow = by_flow;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Summary column: one combined histogram, or one per flow.\n"
+                        "In \"by flow\", click a flow's histogram to highlight it.\n"
+                        "Shortcut: V");
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+
     // ---- 6. Tabulate all rows, find the fullest cell anywhere, then color
     // and draw. ----
     frame.largest_cell = 1;
     for (int i = 0; i < row_count; i++) {
-      rows[i]->tabulate(*histories[i], view);
+      rows[i]->tabulate(*histories[i], view, by_flow);
       int largest = rows[i]->get_tabulation().get_largest_cell();
       if (largest > frame.largest_cell) {
         frame.largest_cell = largest;
@@ -376,7 +437,9 @@ int main(int argc, char* argv[]) {
       rows[i]->draw(draw_list, *histories[i], layouts[i], frame);
     }
     if (!timeline.is_following()) {
-      draw_outlined_text(draw_list, ImVec2(display_width - margin - 2, margin + 1),
+      // Just left of the View button.
+      draw_outlined_text(draw_list,
+                         ImVec2(display_width - margin - button_width - 24, margin + 1),
                          IM_COL32(255, 255, 96, 255), "viewing history - End to follow", true,
                          false);
     }

@@ -14,10 +14,16 @@
 // separated by single spaces. Values never contain spaces.
 //
 // Client -> daemon:
-//     add <id> <host> [interval=<seconds>] [size=<bytes>]
+//     add <id> <host> [interval=<seconds>] [size=<bytes>] [flows=<K>]
 //         Start pinging <host>. <id> is a non-negative integer the CLIENT
 //         chooses; every event about this target carries it. Defaults:
-//         interval=1 size=64.
+//         interval=1 size=64 flows=0.
+//
+//         flows=K (1..64) spreads the pings over K "flows". Every packet in a
+//         flow has the same ICMP checksum, so routers that load-balance by
+//         hashing header fields send the whole flow down the same path.
+//         Ping n (counting from 1) belongs to flow (n-1) mod K. flows=0 (the
+//         default) leaves the checksum free to vary, as plain ping does.
 //     remove <id>
 //
 // Daemon -> client:
@@ -29,10 +35,11 @@
 //     error <id> <message...>
 //         <id> is "-" when the error isn't about a target. The message is
 //         free text and is the only place spaces are allowed.
-//     ping <id> seq=<n> t=<send time>
-//     reply <id> seq=<n> t=<receive time> rtt=<seconds> ttl=<ttl> from=<address>
+//     ping <id> seq=<n> t=<send time> [flow=<f>]
+//     reply <id> seq=<n> t=<receive time> rtt=<seconds> ttl=<ttl> from=<address> [flow=<f>]
 //         Times are wall-clock seconds since the epoch. seq starts at 1 for
-//         each target and increments by one per packet.
+//         each target and increments by one per packet. flow= is present
+//         only for targets added with flows=K, and is 0..K-1.
 
 #ifndef PINGEM_SHARED_PROTOCOL_H
 #define PINGEM_SHARED_PROTOCOL_H
@@ -43,6 +50,7 @@
 #include <vector>
 
 const int PROTOCOL_VERSION = 1;
+const int MAX_FLOWS = 64;
 const char* const USER_ICMP_SOCKET_NAME = "user_icmp";   // abstract: "@user_icmp"
 
 // Lines longer than this are a protocol error.
@@ -87,13 +95,14 @@ bool parse_id(const std::string& text, int* id);
 
 // Formatting. Each returns a complete line including the '\n'.
 std::string format_hello();
-std::string format_add(int id, const std::string& host, double interval, int size);
+std::string format_add(int id, const std::string& host, double interval, int size, int flows);
 std::string format_remove(int id);
 std::string format_added(int id, const std::string& host, const std::string& address);
 std::string format_removed(int id);
 std::string format_error(int id, const std::string& text);   // id < 0 prints "-"
-std::string format_ping(int id, uint64_t seq, double send_time);
+// flow < 0 omits the flow= field.
+std::string format_ping(int id, uint64_t seq, double send_time, int flow);
 std::string format_reply(int id, uint64_t seq, double receive_time, double rtt, int ttl,
-                         const std::string& from);
+                         const std::string& from, int flow);
 
 #endif

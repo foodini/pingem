@@ -162,15 +162,22 @@ void Daemon::send_due_packets(double now) {
 void Daemon::send_one(Target* target) {
   uint64_t full_sequence = target->next_sequence++;
   uint16_t wire_sequence = (uint16_t)(full_sequence & 0xffff);
+  int flow = -1;
+  int fixed_checksum = -1;
+  if (target->flows > 0) {
+    flow = (int)((full_sequence - 1) % (uint64_t)target->flows);
+    fixed_checksum = target->flow_checksums[flow];
+  }
 
   OutstandingPacket packet;
   packet.target_id = target->id;
   packet.full_sequence = full_sequence;
+  packet.flow = flow;
   packet.send_realtime = realtime_now();
   packet.send_monotonic = monotonic_now();
 
   int error = icmp_socket->send_echo(target->address, target->identifier, wire_sequence,
-                                     target->packet_size);
+                                     target->packet_size, fixed_checksum);
   if (error != target->last_send_error) {
     if (error != 0) {
       log_message("target %d (%s): send failing: %s", target->id, target->name.c_str(),
@@ -185,7 +192,7 @@ void Daemon::send_one(Target* target) {
   // expire, and the client - which gets the "ping" event either way - will
   // count it as lost. A dead network should look like loss, not like silence.
   packet_table.insert(target->identifier, wire_sequence, packet);
-  emit_ping(target, full_sequence, packet.send_realtime);
+  emit_ping(target, full_sequence, packet.send_realtime, flow);
 }
 
 void Daemon::schedule(Target* target) {
@@ -231,13 +238,18 @@ static bool is_plausible_host(const std::string& name) {
 // Validates a request for a new target and starts resolving it. Used by both
 // client kinds. On failure, returns false with *error set.
 bool Daemon::request_target(Client* client, int client_target_id, const std::string& name,
-                            double interval, int packet_size, std::string* error) {
+                            double interval, int packet_size, int flows,
+                            std::string* error) {
   if (!is_plausible_host(name)) {
     *error = "bad address";
     return false;
   }
   if (!(interval > 0.0) || isinf(interval)) {
     *error = "bad interval";
+    return false;
+  }
+  if (flows < 0 || flows > MAX_FLOWS) {
+    *error = "bad flows";
     return false;
   }
   if (client->targets_by_client_id.count(client_target_id) != 0 ||
@@ -265,6 +277,7 @@ bool Daemon::request_target(Client* client, int client_target_id, const std::str
   pending->name = name;
   pending->interval = interval;
   pending->packet_size = packet_size;
+  pending->flows = flows;
   pending->request = request;
   pending_adds.push_back(pending);
   return true;
@@ -349,6 +362,30 @@ void Daemon::start_target(PendingAdd* pending, Client* client, const struct in_a
   target->packet_size = pending->packet_size;
   target->last_send_error = 0;
 
+  // One fixed checksum per flow. The values themselves don't matter - only
+  // that they're distinct - but they must look random: real routers hash
+  // with simple functions (XOR folds, CRCs), and a regular pattern of
+  // checksums (an arithmetic progression, say) can land every flow in the
+  // same hash bucket, hiding the very paths we're trying to find. So: random
+  // values, no duplicates, and never 0x0000 or 0xffff, which are both "zero"
+  // in ones-complement arithmetic.
+  target->flows = pending->flows;
+  while ((int)target->flow_checksums.size() < target->flows) {
+    uint16_t value = (uint16_t)(lrand48() & 0xffff);
+    if (value == 0x0000 || value == 0xffff) {
+      continue;
+    }
+    bool duplicate = false;
+    for (size_t i = 0; i < target->flow_checksums.size(); i++) {
+      if (target->flow_checksums[i] == value) {
+        duplicate = true;
+      }
+    }
+    if (!duplicate) {
+      target->flow_checksums.push_back(value);
+    }
+  }
+
   // Stagger the first packet by a random fraction of the interval (at most a
   // second). Clients tend to add all their targets at the same instant;
   // without this every target would fire in the same millisecond, forever.
@@ -367,9 +404,9 @@ void Daemon::start_target(PendingAdd* pending, Client* client, const struct in_a
                                       target->address_text));
   }
 
-  log_message("client %d: target %d %s (%s) interval=%.3fs size=%d id=%u", client->fd,
+  log_message("client %d: target %d %s (%s) interval=%.3fs size=%d flows=%d id=%u", client->fd,
               target->id, target->name.c_str(), target->address_text.c_str(), target->interval,
-              target->packet_size, (unsigned)target->identifier);
+              target->packet_size, target->flows, (unsigned)target->identifier);
 }
 
 void Daemon::destroy_target(Target* target) {
@@ -414,7 +451,7 @@ void Daemon::drain_icmp_socket() {
 
     double rtt = reply.receive_monotonic - packet.send_monotonic;
     emit_reply(target_it->second, packet.full_sequence, reply.receive_realtime, rtt, reply.ttl,
-               ipv4_to_string(reply.source));
+               ipv4_to_string(reply.source), packet.flow);
   }
 }
 
@@ -422,7 +459,7 @@ void Daemon::drain_icmp_socket() {
 // Events to clients.
 // ---------------------------------------------------------------------------
 
-void Daemon::emit_ping(Target* target, uint64_t sequence, double send_time) {
+void Daemon::emit_ping(Target* target, uint64_t sequence, double send_time, int flow) {
   std::map<int, Client*>::iterator found = clients.find(target->client_fd);
   if (found == clients.end()) {
     return;
@@ -431,12 +468,12 @@ void Daemon::emit_ping(Target* target, uint64_t sequence, double send_time) {
   if (client->kind == HTTP_CLIENT) {
     queue_output(client, make_ping_event(target->address_text, sequence, send_time));
   } else {
-    queue_output(client, format_ping(target->client_target_id, sequence, send_time));
+    queue_output(client, format_ping(target->client_target_id, sequence, send_time, flow));
   }
 }
 
 void Daemon::emit_reply(Target* target, uint64_t sequence, double receive_time, double rtt,
-                        int ttl, const std::string& from) {
+                        int ttl, const std::string& from, int flow) {
   std::map<int, Client*>::iterator found = clients.find(target->client_fd);
   if (found == clients.end()) {
     return;
@@ -446,7 +483,8 @@ void Daemon::emit_reply(Target* target, uint64_t sequence, double receive_time, 
     queue_output(client, make_reply_event(from, sequence, receive_time, rtt, ttl));
   } else {
     queue_output(client,
-                 format_reply(target->client_target_id, sequence, receive_time, rtt, ttl, from));
+                 format_reply(target->client_target_id, sequence, receive_time, rtt, ttl, from,
+                              flow));
   }
 }
 
@@ -589,7 +627,7 @@ void Daemon::handle_http_request(Client* client, const std::string& head) {
   }
 
   std::string error;
-  if (!request_target(client, 0, name, interval, packet_size, &error)) {
+  if (!request_target(client, 0, name, interval, packet_size, 0, &error)) {
     fail_http_client(client, error == "resolver unavailable" ? 503 : 400,
                      error == "resolver unavailable" ? "Service Unavailable" : "Bad Request",
                      error + "\n");
@@ -605,10 +643,11 @@ void Daemon::handle_line(Client* client, const std::string& line) {
   }
 
   if (message.verb == "add") {
-    // add <id> <host> [interval=S] [size=N]
+    // add <id> <host> [interval=S] [size=N] [flows=K]
     int id;
     if (message.args.size() != 2 || !parse_id(message.args[0], &id)) {
-      queue_output(client, format_error(-1, "usage: add <id> <host> [interval=S] [size=N]"));
+      queue_output(client,
+                   format_error(-1, "usage: add <id> <host> [interval=S] [size=N] [flows=K]"));
       return;
     }
     double interval = 1.0;
@@ -621,8 +660,13 @@ void Daemon::handle_line(Client* client, const std::string& line) {
       queue_output(client, format_error(id, "bad size"));
       return;
     }
+    int flows = 0;
+    if (message.fields.count("flows") != 0 && !get_field(message, "flows", &flows)) {
+      queue_output(client, format_error(id, "bad flows"));
+      return;
+    }
     std::string error;
-    if (!request_target(client, id, message.args[1], interval, size, &error)) {
+    if (!request_target(client, id, message.args[1], interval, size, flows, &error)) {
       queue_output(client, format_error(id, error));
     }
     return;

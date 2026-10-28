@@ -11,7 +11,14 @@
 static const ImU32 COLOR_BORDER = IM_COL32(128, 128, 128, 255);
 static const ImU32 COLOR_LABEL = IM_COL32(255, 96, 96, 255);
 static const ImU32 COLOR_GRID = IM_COL32(255, 96, 96, 80);
-static const ImU32 COLOR_LOSS = IM_COL32(64, 160, 64, 255);
+// Darker than the pure red that marks the fullest cell, so the two stay
+// distinct.
+static const ImU32 COLOR_LOSS = IM_COL32(150, 0, 0, 255);
+// With a flow selected, everything that isn't that flow is drawn at this
+// fraction of its normal brightness.
+static const double DIM = 0.3;
+static const ImU32 COLOR_LOSS_DIM = IM_COL32(45, 0, 0, 255);
+static const ImU32 COLOR_SELECTED_STRIP = IM_COL32(45, 45, 45, 255);
 static const ImU32 COLOR_CROSSHAIR = IM_COL32(255, 0, 0, 255);
 static const ImU32 COLOR_STATS = IM_COL32(255, 255, 96, 255);
 static const ImU32 COLOR_TEXT = IM_COL32(255, 255, 255, 255);
@@ -92,7 +99,9 @@ RowView::RowView()
       texture(0),
       texture_columns(0),
       texture_rows(0),
-      colored_with_largest(-1) {
+      colored_with_largest(-1),
+      colored_with_highlight(-1),
+      selected_flow(-1) {
 }
 
 RowView::~RowView() {
@@ -106,57 +115,118 @@ const Tabulation& RowView::get_tabulation() const {
   return tabulation;
 }
 
-void RowView::tabulate(const TargetHistory& history, const ViewWindow& window) {
-  if (tabulation.build_if_needed(history, window)) {
+void RowView::tabulate(const TargetHistory& history, const ViewWindow& window, bool by_flow) {
+  // A selection only means something in "by flow" mode, and only while the
+  // target actually has that flow.
+  int highlight = -1;
+  if (by_flow && selected_flow >= 0 && selected_flow < history.get_flow_count()) {
+    highlight = selected_flow;
+  }
+  if (tabulation.build_if_needed(history, window, highlight)) {
     tabulation_changed = true;
   }
 }
 
-// Turns counts into colors (same formula as the JS version): occupied cells
-// range from dim to bright blue-white with how full they are, relative to the
-// fullest cell on screen in ANY row; the fullest cell itself is red (unless
-// every cell holds a single reply).
+void RowView::toggle_flow(int flow) {
+  selected_flow = (selected_flow == flow) ? -1 : flow;
+}
+
+int RowView::flow_strip_at(const RowLayout& layout, ImVec2 point, int flow_count) const {
+  if (flow_count <= 0 || point.x < layout.summary_min.x || point.x >= layout.summary_max.x ||
+      point.y < layout.summary_min.y || point.y >= layout.summary_max.y) {
+    return -1;
+  }
+  float strip_width = (layout.summary_max.x - layout.summary_min.x - 2) / flow_count;
+  int flow = (int)((point.x - layout.summary_min.x - 1) / strip_width);
+  if (flow < 0 || flow >= flow_count) {
+    return -1;
+  }
+  return flow;
+}
+
+void RowView::describe_flow(int flow, char* out, size_t out_size) const {
+  const FlowStats& stats = tabulation.get_stats(flow);
+  int total = stats.get_total();
+  if (total == 0) {
+    snprintf(out, out_size, "flow %d: no data on screen", flow);
+    return;
+  }
+  char average[32];
+  char percentile[32];
+  format_ms(stats.get_average(), " avg", average, sizeof(average));
+  format_ms(stats.get_percentile(0.9), " 90%", percentile, sizeof(percentile));
+  snprintf(out, out_size, "flow %d: %.1f%% loss, %d pkts, %s, %s\n%s", flow,
+           100.0 * stats.lost / total, total, average, percentile,
+           flow == selected_flow ? "click to clear the highlight" : "click to highlight this flow");
+}
+
+// The heatmap color for a cell holding `count` replies when the fullest cell
+// holds `largest` (same formula as the JS version): dim to bright blue-white
+// with how full it is; the fullest cell itself red, unless every cell holds a
+// single reply, when "fullest" means nothing and everything would be red.
+// `brightness` < 1 dims it, and dimmed cells are never red. `floor` is the
+// intensity of a cell holding a single reply: 0.30 normally; higher for a
+// highlighted flow, so even its sparsest cells stand out from the dimmed rest.
+static uint32_t cell_color(int count, int largest, double brightness, double floor) {
+  uint8_t red;
+  uint8_t green;
+  uint8_t blue;
+  if (count == largest && largest > 1 && brightness >= 1.0) {
+    red = 255;
+    green = 0;
+    blue = 0;
+  } else {
+    double intensity = 0.0;
+    if (largest > 1) {
+      intensity = (double)(count - 1) / (double)(largest - 1);
+    }
+    if (intensity > 1.0) intensity = 1.0;
+    intensity = (intensity * (1.0 - floor) + floor) * brightness;
+    blue = (uint8_t)(intensity * 255.0);
+    red = (uint8_t)(intensity * intensity * 255.0);
+    green = red;
+  }
+  // RGBA in memory order, packed little-endian into a uint32.
+  return (uint32_t)red | ((uint32_t)green << 8) | ((uint32_t)blue << 16) | ((uint32_t)255 << 24);
+}
+
+// Turns counts into colors. Normally each cell is colored by its count
+// relative to the fullest cell on screen in ANY row, so rows compare. With a
+// flow selected, cells holding that flow's replies are colored by the
+// selected flow's counts alone (relative to its own fullest cell), and cells
+// holding only other flows are dimmed.
 void RowView::update_texture(const FrameContext& frame) {
   int columns = frame.window.columns;
   int rows = frame.window.rows;
+  int highlight = tabulation.get_selected_flow();
   if (!tabulation_changed && colored_with_largest == frame.largest_cell &&
-      texture_columns == columns && texture_rows == rows) {
+      colored_with_highlight == highlight && texture_columns == columns &&
+      texture_rows == rows) {
     return;
   }
 
   pixels.assign((size_t)columns * rows, 0);
   int largest = frame.largest_cell;
+  int largest_selected = tabulation.get_largest_selected_cell();
   for (int column = 0; column < columns; column++) {
     for (int row = 0; row < rows; row++) {
       int count = tabulation.get_count(column, row);
       if (count == 0) {
         continue;
       }
-      uint8_t red;
-      uint8_t green;
-      uint8_t blue;
-      // Red marks the fullest cell(s). When no cell holds more than one
-      // reply, "fullest" means nothing - and every cell would turn red.
-      if (count == largest && largest > 1) {
-        red = 255;
-        green = 0;
-        blue = 0;
+      uint32_t color;
+      if (highlight < 0) {
+        color = cell_color(count, largest, 1.0, 0.30);
       } else {
-        double intensity = 0.0;
-        if (largest > 1) {
-          intensity = (double)(count - 1) / (double)(largest - 1);
+        int selected = tabulation.get_selected_count(column, row);
+        if (selected > 0) {
+          color = cell_color(selected, largest_selected, 1.0, 0.70);
+        } else {
+          color = cell_color(count, largest, DIM, 0.30);
         }
-        if (intensity > 1.0) intensity = 1.0;
-        intensity = intensity * 0.70 + 0.30;
-        blue = (uint8_t)(intensity * 255.0);
-        red = (uint8_t)(intensity * intensity * 255.0);
-        green = red;
       }
       // Texture row 0 is the top of the image; RTT bucket 0 is the bottom.
-      size_t texel = (size_t)(rows - 1 - row) * columns + column;
-      // RGBA in memory order, packed little-endian into a uint32.
-      pixels[texel] = (uint32_t)red | ((uint32_t)green << 8) | ((uint32_t)blue << 16) |
-                      ((uint32_t)255 << 24);
+      pixels[(size_t)(rows - 1 - row) * columns + column] = color;
     }
   }
 
@@ -184,6 +254,7 @@ void RowView::update_texture(const FrameContext& frame) {
 
   tabulation_changed = false;
   colored_with_largest = largest;
+  colored_with_highlight = highlight;
 }
 
 void RowView::draw(ImDrawList* draw_list, const TargetHistory& history, const RowLayout& layout,
@@ -207,16 +278,28 @@ void RowView::draw_graph(ImDrawList* draw_list, const RowLayout& layout,
     draw_list->AddImage((ImTextureID)(intptr_t)texture, layout.inset_min, inset_max);
   }
 
-  // Loss: a green bar per column, as tall as that column's loss fraction.
+  // Loss: a bar per column, as tall as that column's loss fraction. With a
+  // flow selected, the whole bar is dimmed and the part of it that belongs
+  // to the selected flow is drawn normally from the bottom up - so its
+  // height is that flow's share of the column's packets that were lost.
+  bool highlighting = tabulation.get_selected_flow() >= 0;
   for (int column = 0; column < window.columns; column++) {
     int lost = tabulation.get_column_lost(column);
     if (lost == 0) {
       continue;
     }
-    double fraction = (double)lost / tabulation.get_column_total(column);
+    double total = tabulation.get_column_total(column);
     float x = layout.inset_min.x + column * CELL_WIDTH + CELL_WIDTH / 2 + 0.5f;
-    draw_list->AddLine(ImVec2(x, inset_max.y), ImVec2(x, inset_max.y - (float)fraction * inset_height),
-                       COLOR_LOSS, 1.0f);
+    float top = inset_max.y - (float)(lost / total) * inset_height;
+    draw_list->AddLine(ImVec2(x, inset_max.y), ImVec2(x, top),
+                       highlighting ? COLOR_LOSS_DIM : COLOR_LOSS, 1.0f);
+    if (highlighting) {
+      int selected_lost = tabulation.get_selected_column_lost(column);
+      if (selected_lost > 0) {
+        float selected_top = inset_max.y - (float)(selected_lost / total) * inset_height;
+        draw_list->AddLine(ImVec2(x, inset_max.y), ImVec2(x, selected_top), COLOR_LOSS, 1.0f);
+      }
+    }
   }
 
   // Horizontal grid with latency labels on the left and loss labels on the
@@ -259,8 +342,12 @@ void RowView::draw_graph(ImDrawList* draw_list, const RowLayout& layout,
     draw_list->AddLine(ImVec2(x + 0.5f, layout.graph_min.y), ImVec2(x + 0.5f, layout.graph_max.y),
                        COLOR_GRID);
     format_clock_time(line_time, spacing, text, sizeof(text));
-    draw_outlined_text(draw_list, ImVec2(x - 2, layout.graph_max.y - 1), COLOR_LABEL, text, true,
-                       true);
+    // Labels sit to the left of their line; skip one that would hang off the
+    // left edge of the graph rather than draw it cut in half.
+    if (x - 2 - ImGui::CalcTextSize(text).x >= layout.graph_min.x) {
+      draw_outlined_text(draw_list, ImVec2(x - 2, layout.graph_max.y - 1), COLOR_LABEL, text,
+                         true, true);
+    }
   }
 
   // Crosshair, with latency and date/time at the mouse.
@@ -292,51 +379,97 @@ void RowView::draw_graph(ImDrawList* draw_list, const RowLayout& layout,
   draw_list->AddRect(layout.graph_min, layout.graph_max, COLOR_BORDER);
 }
 
+// One histogram: a bar per RTT bucket, lined up with the graph's rows, in a
+// strip from x0 to x0 + width. Bars are scaled so `largest` fills the strip.
+static void draw_histogram(ImDrawList* draw_list, const FlowStats& stats, int largest, int rows,
+                           float x0, float width, float inset_bottom, float min_length,
+                           double brightness) {
+  if (largest <= 0) {
+    return;
+  }
+  for (int row = 0; row < rows; row++) {
+    int count = stats.buckets[row];
+    if (count == 0) {
+      continue;
+    }
+    double ratio = (double)count / largest;
+    double intensity = (ratio * 0.6 + 0.4) * brightness;
+    uint8_t blue = (uint8_t)(intensity * 255.0);
+    uint8_t red_green = (uint8_t)(intensity * intensity * 255.0);
+    float length = ceilf((float)ratio * width);
+    if (length < min_length) {
+      length = min_length;
+    }
+    float y_bottom = inset_bottom - row * CELL_HEIGHT;
+    draw_list->AddRectFilled(ImVec2(x0, y_bottom - CELL_HEIGHT), ImVec2(x0 + length, y_bottom),
+                             IM_COL32(red_green, red_green, blue, 255));
+  }
+}
+
 void RowView::draw_summary(ImDrawList* draw_list, const RowLayout& layout,
                            const FrameContext& frame) const {
   const ViewWindow& window = frame.window;
   float width = layout.summary_max.x - layout.summary_min.x;
   float inset_bottom = layout.inset_min.y + window.rows * CELL_HEIGHT;
+  int flow_count = tabulation.get_flow_count();
+  int highlight = tabulation.get_selected_flow();
 
   draw_list->AddRectFilled(layout.summary_min, layout.summary_max, IM_COL32(0, 0, 0, 255));
 
-  // Histogram of every reply in the window, one bar per RTT bucket, lined up
-  // with the graph's rows.
-  int largest = tabulation.get_largest_summary_bucket();
-  for (int row = 0; row < window.rows && largest > 0; row++) {
-    int count = tabulation.get_summary_bucket(row);
-    if (count == 0) {
-      continue;
+  if (frame.by_flow && flow_count > 0) {
+    // One narrow histogram per flow, side by side, all on the same scale.
+    float strip_width = (width - 2) / flow_count;
+    int largest = tabulation.get_largest_flow_bucket();
+    for (int flow = 0; flow < flow_count; flow++) {
+      float x0 = floorf(layout.summary_min.x + 1 + flow * strip_width);
+      float x1 = floorf(layout.summary_min.x + 1 + (flow + 1) * strip_width);
+      if (flow == highlight) {
+        draw_list->AddRectFilled(ImVec2(x0, layout.summary_min.y + 1),
+                                 ImVec2(x1, layout.summary_max.y - 1), COLOR_SELECTED_STRIP);
+      }
+      double brightness = (highlight < 0 || flow == highlight) ? 1.0 : DIM;
+      draw_histogram(draw_list, tabulation.get_stats(flow), largest, window.rows, x0 + 1,
+                     x1 - x0 - 3, inset_bottom, 2.0f, brightness);
+      if (flow > 0) {
+        draw_list->AddLine(ImVec2(x0 + 0.5f, layout.summary_min.y),
+                           ImVec2(x0 + 0.5f, layout.summary_max.y), COLOR_GRID);
+      }
+      char label[16];
+      snprintf(label, sizeof(label), "%d", flow);
+      float label_width = ImGui::CalcTextSize(label).x;
+      draw_outlined_text(draw_list,
+                         ImVec2((x0 + x1) / 2 - label_width / 2, layout.summary_max.y - 1),
+                         flow == highlight ? COLOR_TEXT : COLOR_LABEL, label, false, true);
     }
-    double ratio = (double)count / largest;
-    double intensity = ratio * 0.6 + 0.4;
-    uint8_t blue = (uint8_t)(intensity * 255.0);
-    uint8_t red_green = (uint8_t)(intensity * intensity * 255.0);
-    float length = ceilf((float)ratio * (width - 2));
-    if (length < 5.0f) {
-      length = 5.0f;
-    }
-    float y_bottom = inset_bottom - row * CELL_HEIGHT;
-    draw_list->AddRectFilled(ImVec2(layout.summary_min.x + 1, y_bottom - CELL_HEIGHT),
-                             ImVec2(layout.summary_min.x + 1 + length, y_bottom),
-                             IM_COL32(red_green, red_green, blue, 255));
+  } else {
+    // One histogram of every reply in the window.
+    const FlowStats& stats = tabulation.get_stats(-1);
+    draw_histogram(draw_list, stats, stats.largest_bucket, window.rows, layout.summary_min.x + 1,
+                   width - 2, inset_bottom, 5.0f, 1.0);
   }
 
-  // Statistics, top right.
-  if (tabulation.get_summary_total() > 0) {
+  // Statistics, top right: for the selected flow if there is one, otherwise
+  // for everything.
+  const FlowStats& stats = tabulation.get_stats(highlight);
+  if (stats.get_total() > 0) {
     char text[64];
     float x = layout.summary_max.x - 2;
     float y = layout.summary_min.y + 1;
     float line = ImGui::GetTextLineHeight();
-    double loss = (double)tabulation.get_summary_lost() / tabulation.get_summary_total();
+    if (highlight >= 0) {
+      snprintf(text, sizeof(text), "flow %d", highlight);
+      draw_outlined_text(draw_list, ImVec2(x, y), COLOR_TEXT, text, true, false);
+      y += line;
+    }
+    double loss = (double)stats.lost / stats.get_total();
     snprintf(text, sizeof(text), "%.1f%% loss", loss * 100.0);
     draw_outlined_text(draw_list, ImVec2(x, y), COLOR_STATS, text, true, false);
-    snprintf(text, sizeof(text), "%d pkts", tabulation.get_summary_total());
+    snprintf(text, sizeof(text), "%d pkts", stats.get_total());
     draw_outlined_text(draw_list, ImVec2(x, y + line), COLOR_STATS, text, true, false);
-    if (tabulation.get_summary_replies() > 0) {
-      format_ms(tabulation.get_summary_average(), " avg", text, sizeof(text));
+    if (!stats.sorted_rtts.empty()) {
+      format_ms(stats.get_average(), " avg", text, sizeof(text));
       draw_outlined_text(draw_list, ImVec2(x, y + 2 * line), COLOR_STATS, text, true, false);
-      format_ms(tabulation.get_summary_percentile(0.9), " 90%", text, sizeof(text));
+      format_ms(stats.get_percentile(0.9), " 90%", text, sizeof(text));
       draw_outlined_text(draw_list, ImVec2(x, y + 3 * line), COLOR_STATS, text, true, false);
     }
   }

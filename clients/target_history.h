@@ -35,6 +35,7 @@ struct Sample {
   double send_time;     // wall-clock seconds, from the daemon
   float rtt;            // seconds; valid only when REPLIED
   uint8_t state;        // a SampleState
+  int8_t flow;          // 0..K-1, or -1 if the target doesn't use flows
 };
 
 class TargetHistory {
@@ -44,7 +45,7 @@ public:
   // Events from the daemon.
   void on_added(const std::string& address);
   void on_error(const std::string& text);
-  void on_ping(uint64_t seq, double send_time);
+  void on_ping(uint64_t seq, double send_time, int flow);
   void on_reply(uint64_t seq, double receive_time, double rtt, int ttl, const std::string& from);
   void on_session_end();
 
@@ -63,6 +64,10 @@ public:
   // value they last drew to know whether they need to re-tabulate.
   uint64_t get_version() const;
 
+  // How many flows this target's pings are spread over (0 if none). Learned
+  // from the flow numbers the daemon reports.
+  int get_flow_count() const;
+
 private:
   std::string name;
   std::string address;
@@ -71,6 +76,7 @@ private:
   size_t session_base;          // index of seq 1 in the current session
   size_t oldest_pending;        // nothing before this index is PENDING
   uint64_t version;
+  int flow_count;
 };
 
 #endif

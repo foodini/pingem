@@ -33,13 +33,119 @@ command line:
     sudo apt install libsdl2-dev               # build dependency
     cd clients
     make
-    ./pingem 192.168.1.1 8.8.8.8 amazon.com     # --interval S, --size N
+    ./pingem 192.168.1.1 8.8.8.8 amazon.com     # --interval S, --size N, --flows K
 
 Controls: the mouse wheel over a graph zooms around the mouse pointer;
 left-click and drag scrubs through time (the epoch you grab stays under the
-mouse); End (or F) goes back to following "now"; Q or Escape quits. If user_icmp isn't
-running, or restarts, the client keeps retrying and picks up where it left off;
-the outage shows as a gap.
+mouse); End (or F) goes back to following "now"; the View button (or V)
+switches the summary column between "combined" and "by flow"; Q or Escape
+quits. If user_icmp isn't running, or restarts, the client keeps retrying and
+picks up where it left off; the outage shows as a gap.
+
+## Flows, and how to read the "by flow" view
+
+(The screenshots in this section are from simulations - see "About the
+example images" at the end of the section.)
+
+**The question flows answer.** Look at the histogram in the summary column
+(the bars on the right of each row: one bar per latency range, longer bar =
+more replies took that long). Often it isn't one smooth hump. It can have two
+or more separate humps with a gap between them - say a pile of replies around
+14 ms, another pile around 17 ms, and few in between. We'll call each hump a
+*clump*. A clump means "there are distinct ways a packet can be delayed, and
+each packet gets one of them". The question is: what are those distinct ways?
+
+![Two clumps](docs/images/combined_two_clumps.png)
+
+*Two clumps. The graph on the left shows two horizontal bands of replies -
+one around 4 ms, one around 10 ms - and the histogram on the right has a
+hump for each.*
+
+One common answer is that your packets are taking different routes. Between
+you and a big site there are often several parallel paths, and routers spread
+traffic over them. Usually they pick the path by hashing fields of the packet
+header - so all packets that look the same go the same way, and a slower path
+would show up as its own clump.
+
+**What a flow is.** pingem spreads each host's pings over 8 *flows* (round
+robin: ping 1 is flow 0, ping 2 is flow 1, ... ping 9 is flow 0 again). Every
+ping in a flow is built to have the same ICMP checksum, and the flows have
+different checksums. Routers that hash the checksum to pick a path will
+therefore send every ping in a flow down the same path - but different flows
+may go different ways.
+
+**The "by flow" view.** Click View (or press V) and each row's summary column
+splits into 8 small histograms, one per flow, numbered 0-7 underneath, all on
+the same scale. Hover over one for its statistics; click it to highlight that
+flow in the graph (everything else dims, including the other flows' share of
+each loss bar).
+
+![Hovering over a flow](docs/images/by_flow_tooltip.png)
+
+*The by-flow view with flow 3 highlighted: its replies stay bright in the
+graph, the rest dim. The tooltip and the numbers in the top right corner are
+flow 3's own statistics.*
+
+Now compare the clumps across the 8 histograms:
+
+    Each flow has ONE of the clumps -       Every flow has BOTH clumps -
+    the clumps "sort cleanly by flow":      they don't sort by flow:
+
+    flow:  0  1  2  3  4  5  6  7           flow:  0  1  2  3  4  5  6  7
+    17ms      #     #        #  #           17ms   #  #  #  #  #  #  #  #
+    14ms   #     #     #  #                 14ms   #  #  #  #  #  #  #  #
+
+* **Each flow has only one of the clumps** (left). Flows 1, 3, 6 and 7 always
+  take about 17 ms; flows 0, 2, 4 and 5 always take about 14 ms. Since a
+  flow's packets all follow one path, and a flow never shows the other clump,
+  the clumps *are* the paths: you're being load-balanced over two routes and
+  one is about 3 ms slower. (Which flows land where is effectively random -
+  it depends on each router's hash.)
+
+  ![Each flow in one clump](docs/images/by_flow_sorted.png)
+
+  *Flows 0, 2, 4 and 5 sit only in the fast clump; 1, 3, 6 and 7 only in the
+  slow one. Two routes.*
+
+  Highlighting one of the slow flows confirms it: its replies all fall in
+  the upper band, and only its share of each loss bar stays bright - in this
+  simulation the slow route is also the one dropping packets.
+
+  ![A slow flow highlighted](docs/images/by_flow_highlight.png)
+* **Every flow has both clumps** (right). Packets that took the same path -
+  same flow - still split into both clumps, so the second clump comes from
+  something that varies packet by packet, not from routing. Usual suspects:
+  your access link (cable modems wait for permission to transmit on a fixed
+  schedule; Wi-Fi retransmits), a busy queue somewhere, or the far end. To
+  find out where, add a row for each hop along the way (your router, your
+  ISP's first router, ...) and see at which hop the second clump first
+  appears. One caveat: if the routers on your path ignore the checksum when
+  balancing ICMP (some hash only addresses), flows can't separate paths and
+  you'll see this picture even if there are several routes. The route
+  tracing planned below will tell those two cases apart.
+
+  ![Every flow in both clumps](docs/images/by_flow_both.png)
+
+  *All eight flows show both clumps: the delay is chosen per packet, not per
+  route.*
+* **Something in between** - some flows with one clump, some with both - can
+  mean several balancers in a row, or one that spreads individual packets
+  rather than flows.
+
+  ![Some flows in one clump, some in both](docs/images/by_flow_mixed.png)
+
+  *Flows 0 and 7 only in the fast clump, 1 and 4 only in the slow one, the
+  rest in both.*
+
+`--flows 0` turns flows off and lets the checksum vary with every packet, as
+plain ping does (and then routers may scatter your pings over all the paths).
+
+**About the example images.** They're real pingem screenshots, but of
+simulated networks: `docs/tools/fake_responder.py` answers pings to
+127.0.0.2-5 with made-up delays (two routes chosen by checksum, delays chosen
+per packet, and so on), so each situation can be shown on demand. Its header
+says how to run it to regenerate the images. The odd stray reply far above
+the bands is the simulator's own timing noise.
 
 The Unix socket speaks a plain-text line protocol (documented in
 shared/protocol.h), so you can also drive user_icmp by hand:

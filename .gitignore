@@ -1,0 +1,23 @@
+# Build output
+*.o
+/user_icmp/user_icmp
+/clients/pingem
+a.out
+
+# Python
+__pycache__/
+*.pyc
+
+# Editors and IDEs
+.vs/
+.vscode/
+*.swp
+*~
+*.bak
+
+# Dear ImGui writes window layout here if io.IniFilename is ever left set
+imgui.ini
+
+# Crash dumps
+core
+core.*

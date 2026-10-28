@@ -25,6 +25,7 @@
 struct OutstandingPacket {
   int target_id;
   uint64_t full_sequence;    // the 64-bit sequence number the client sees
+  int flow;                  // 0..K-1, or -1 if the target doesn't use flows
   double send_monotonic;     // for RTT
   double send_realtime;      // for reporting
 };

@@ -50,7 +50,7 @@ bool DaemonLink::try_connect() {
   output.clear();
   for (size_t i = 0; i < targets.size(); i++) {
     output += format_add(targets[i].id, targets[i].host, targets[i].interval,
-                         targets[i].packet_size);
+                         targets[i].packet_size, targets[i].flows);
   }
   return true;
 }
@@ -149,6 +149,7 @@ void DaemonLink::handle_line(const std::string& line, std::vector<LinkEvent>* ev
   event.time = 0.0;
   event.rtt = 0.0;
   event.ttl = 0;
+  event.flow = -1;
 
   if (message.verb == "hello") {
     if (message.args.size() < 2 || atoi(message.args[1].c_str()) != PROTOCOL_VERSION) {
@@ -170,6 +171,7 @@ void DaemonLink::handle_line(const std::string& line, std::vector<LinkEvent>* ev
 
   if (message.verb == "ping") {
     event.type = LINK_PING;
+    get_field(message, "flow", &event.flow);
     if (get_field(message, "seq", &event.seq) && get_field(message, "t", &event.time)) {
       events->push_back(event);
     }
@@ -179,6 +181,7 @@ void DaemonLink::handle_line(const std::string& line, std::vector<LinkEvent>* ev
         get_field(message, "rtt", &event.rtt)) {
       get_field(message, "ttl", &event.ttl);
       get_field(message, "from", &event.address);
+      get_field(message, "flow", &event.flow);
       events->push_back(event);
     }
   } else if (message.verb == "added") {

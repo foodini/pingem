@@ -23,42 +23,93 @@ double max_rtt_in_window(const TargetHistory& history, double start, double end)
   return max_rtt;
 }
 
+// ---------------------------------------------------------------------------
+// FlowStats
+// ---------------------------------------------------------------------------
+
+int FlowStats::get_total() const {
+  return (int)sorted_rtts.size() + lost;
+}
+
+double FlowStats::get_average() const {
+  if (sorted_rtts.empty()) {
+    return 0.0;
+  }
+  return rtt_sum / sorted_rtts.size();
+}
+
+double FlowStats::get_percentile(double fraction) const {
+  if (sorted_rtts.empty()) {
+    return 0.0;
+  }
+  size_t index = (size_t)floor(sorted_rtts.size() * fraction);
+  if (index >= sorted_rtts.size()) {
+    index = sorted_rtts.size() - 1;
+  }
+  return sorted_rtts[index];
+}
+
+// ---------------------------------------------------------------------------
+// Tabulation
+// ---------------------------------------------------------------------------
+
 Tabulation::Tabulation()
     : built(false),
+      built_selected_flow(-1),
       built_version(0),
       built_sample_count(0),
       largest_cell(0),
-      largest_summary_bucket(0),
-      summary_lost(0),
-      summary_rtt_sum(0.0) {
+      largest_selected_cell(0),
+      largest_flow_bucket(0) {
+  reset_stats(&all_flows, 0);
 }
 
-bool Tabulation::build_if_needed(const TargetHistory& history, const ViewWindow& window) {
-  if (built && built_window == window && built_version == history.get_version() &&
+void Tabulation::reset_stats(FlowStats* stats, int rows) {
+  stats->buckets.assign(rows, 0);
+  stats->largest_bucket = 0;
+  stats->lost = 0;
+  stats->sorted_rtts.clear();
+  stats->rtt_sum = 0.0;
+}
+
+bool Tabulation::build_if_needed(const TargetHistory& history, const ViewWindow& window,
+                                 int selected_flow) {
+  if (built && built_window == window && built_selected_flow == selected_flow &&
+      built_version == history.get_version() &&
       built_sample_count == history.get_samples().size()) {
     return false;
   }
-  build(history, window);
+  build(history, window, selected_flow);
   return true;
 }
 
-void Tabulation::build(const TargetHistory& history, const ViewWindow& window) {
+void Tabulation::build(const TargetHistory& history, const ViewWindow& window,
+                       int selected_flow) {
   built = true;
   built_window = window;
+  built_selected_flow = selected_flow;
   built_version = history.get_version();
   built_sample_count = history.get_samples().size();
 
   int columns = window.columns;
   int rows = window.rows;
+  int flow_count = history.get_flow_count();
+
   counts.assign((size_t)columns * rows, 0);
   column_total.assign(columns, 0);
   column_lost.assign(columns, 0);
-  summary_buckets.assign(rows, 0);
-  sorted_rtts.clear();
-  summary_lost = 0;
-  summary_rtt_sum = 0.0;
   largest_cell = 0;
-  largest_summary_bucket = 0;
+
+  selected_counts.assign((size_t)columns * rows, 0);
+  selected_column_lost.assign(columns, 0);
+  largest_selected_cell = 0;
+
+  reset_stats(&all_flows, rows);
+  per_flow.resize(flow_count);
+  for (int flow = 0; flow < flow_count; flow++) {
+    reset_stats(&per_flow[flow], rows);
+  }
+  largest_flow_bucket = 0;
 
   double epoch = (window.end - window.start) / columns;
   // A hair above the max, so the largest reply lands in the top row rather
@@ -80,33 +131,71 @@ void Tabulation::build(const TargetHistory& history, const ViewWindow& window) {
     if (column >= columns) column = columns - 1;
     column_total[column]++;
 
+    int flow = sample.flow;
+    FlowStats* flow_stats = NULL;
+    if (flow >= 0 && flow < flow_count) {
+      flow_stats = &per_flow[flow];
+    }
+    bool is_selected = selected_flow >= 0 && flow == selected_flow;
+
     if (sample.state == SAMPLE_LOST) {
       column_lost[column]++;
-      summary_lost++;
+      all_flows.lost++;
+      if (flow_stats != NULL) {
+        flow_stats->lost++;
+      }
+      if (is_selected) {
+        selected_column_lost[column]++;
+      }
       continue;
     }
 
     int row = (int)(sample.rtt * rtt_scale);
     if (row < 0) row = 0;
     if (row >= rows) row = rows - 1;
+    size_t cell_index = (size_t)column * rows + row;
 
-    int& cell = counts[(size_t)column * rows + row];
+    int& cell = counts[cell_index];
     cell++;
     if (cell > largest_cell) {
       largest_cell = cell;
     }
-    int& bucket = summary_buckets[row];
-    bucket++;
-    if (bucket > largest_summary_bucket) {
-      largest_summary_bucket = bucket;
+    if (is_selected) {
+      int& selected_cell = selected_counts[cell_index];
+      selected_cell++;
+      if (selected_cell > largest_selected_cell) {
+        largest_selected_cell = selected_cell;
+      }
     }
-    sorted_rtts.push_back(sample.rtt);
-    summary_rtt_sum += sample.rtt;
+
+    int& bucket = all_flows.buckets[row];
+    bucket++;
+    if (bucket > all_flows.largest_bucket) {
+      all_flows.largest_bucket = bucket;
+    }
+    all_flows.sorted_rtts.push_back(sample.rtt);
+    all_flows.rtt_sum += sample.rtt;
+
+    if (flow_stats != NULL) {
+      int& flow_bucket = flow_stats->buckets[row];
+      flow_bucket++;
+      if (flow_bucket > flow_stats->largest_bucket) {
+        flow_stats->largest_bucket = flow_bucket;
+      }
+      if (flow_bucket > largest_flow_bucket) {
+        largest_flow_bucket = flow_bucket;
+      }
+      flow_stats->sorted_rtts.push_back(sample.rtt);
+      flow_stats->rtt_sum += sample.rtt;
+    }
   }
 
   // A numeric sort. (The JS version's samples.sort() compared the numbers as
   // strings.)
-  std::sort(sorted_rtts.begin(), sorted_rtts.end());
+  std::sort(all_flows.sorted_rtts.begin(), all_flows.sorted_rtts.end());
+  for (int flow = 0; flow < flow_count; flow++) {
+    std::sort(per_flow[flow].sorted_rtts.begin(), per_flow[flow].sorted_rtts.end());
+  }
 }
 
 int Tabulation::get_count(int column, int row) const {
@@ -125,40 +214,33 @@ int Tabulation::get_largest_cell() const {
   return largest_cell;
 }
 
-int Tabulation::get_summary_bucket(int row) const {
-  return summary_buckets[row];
+int Tabulation::get_selected_flow() const {
+  return built_selected_flow;
 }
 
-int Tabulation::get_largest_summary_bucket() const {
-  return largest_summary_bucket;
+int Tabulation::get_selected_count(int column, int row) const {
+  return selected_counts[(size_t)column * built_window.rows + row];
 }
 
-int Tabulation::get_summary_total() const {
-  return (int)sorted_rtts.size() + summary_lost;
+int Tabulation::get_selected_column_lost(int column) const {
+  return selected_column_lost[column];
 }
 
-int Tabulation::get_summary_lost() const {
-  return summary_lost;
+int Tabulation::get_largest_selected_cell() const {
+  return largest_selected_cell;
 }
 
-int Tabulation::get_summary_replies() const {
-  return (int)sorted_rtts.size();
+int Tabulation::get_flow_count() const {
+  return (int)per_flow.size();
 }
 
-double Tabulation::get_summary_average() const {
-  if (sorted_rtts.empty()) {
-    return 0.0;
+const FlowStats& Tabulation::get_stats(int flow) const {
+  if (flow < 0 || flow >= (int)per_flow.size()) {
+    return all_flows;
   }
-  return summary_rtt_sum / sorted_rtts.size();
+  return per_flow[flow];
 }
 
-double Tabulation::get_summary_percentile(double fraction) const {
-  if (sorted_rtts.empty()) {
-    return 0.0;
-  }
-  size_t index = (size_t)floor(sorted_rtts.size() * fraction);
-  if (index >= sorted_rtts.size()) {
-    index = sorted_rtts.size() - 1;
-  }
-  return sorted_rtts[index];
+int Tabulation::get_largest_flow_bucket() const {
+  return largest_flow_bucket;
 }
