@@ -38,8 +38,9 @@ command line:
 Controls: the mouse wheel over a graph zooms around the mouse pointer;
 left-click and drag scrubs through time (the epoch you grab stays under the
 mouse); End (or F) goes back to following "now"; the View button (or V)
-switches the summary column between "combined" and "by flow"; Q or Escape
-quits. If user_icmp isn't running, or restarts, the client keeps retrying and
+switches the summary column between "combined" and "by flow"; the Scale
+button (or L) switches the RTT axis between linear and logarithmic (see
+below); Q or Escape quits. If user_icmp isn't running, or restarts, the client keeps retrying and
 picks up where it left off; the outage shows as a gap.
 
 ## Flows, and how to read the "by flow" view
@@ -140,10 +141,53 @@ Now compare the clumps across the 8 histograms:
 `--flows 0` turns flows off and lets the checksum vary with every packet, as
 plain ping does (and then routers may scatter your pings over all the paths).
 
+## Finding where the delay comes from: one row per hop
+
+When something is adding delay or jitter, the quickest way to find *where*
+is to give pingem one row per stage of the path: your own router, your ISP's
+box, the first router on the ISP's side (`traceroute -n 8.8.8.8` shows it as
+the first public address), and a server out on the internet. All rows share
+one RTT scale, so you can compare them directly: the first row where the
+trouble shows up tells you which link added it, and the rows after it should
+look like that row, shifted up a little.
+
+That's hard to see on a linear scale, because a sub-millisecond LAN row and a
+15 ms internet row don't fit on the same axis - and a single slow reply
+anywhere stretches the axis for everyone:
+
+![Four hops, linear scale](docs/images/hops_linear.png)
+
+*Linear scale. One 68 ms straggler sets the top of the axis, and the first
+two rows are crushed into their bottom few pixels.*
+
+Press L (or click Scale) for a logarithmic axis, where every factor of ten
+gets the same height:
+
+![Four hops, log scale](docs/images/hops_log.png)
+
+*The same data on a log scale. Now it's plain that the first two hops are
+tight (about 0.8 and 1.9 ms), that the delay AND the spread both arrive at
+the third hop, and that the fourth just adds a millisecond or two on top. The
+link between hops 2 and 3 - in this simulation, a cable modem's upstream - is
+the one to look at.*
+
+How the log scale is set up:
+* The top is always the slowest reply on screen - the true worst case,
+  never trimmed.
+* The bottom is the largest power of ten below the fastest reply on screen
+  (fastest 8 ms -> bottom 1 ms; fastest 0.5 ms -> bottom 0.1 ms).
+* Grid lines sit on round values (1, 2, 5, 10, 20, 50 ms...).
+* Loss isn't logarithmic: the loss bars keep their linear meaning, and the
+  0-100% ticks on the right edge measure them.
+* Each pixel row of the graph and histogram covers the same *ratio* of
+  RTTs, so a clump at 50 ms looks narrower than one at 5 ms with the same
+  spread in milliseconds.
+
 **About the example images.** They're real pingem screenshots, but of
 simulated networks: `docs/tools/fake_responder.py` answers pings to
 127.0.0.2-5 with made-up delays (two routes chosen by checksum, delays chosen
-per packet, and so on), so each situation can be shown on demand. Its header
+per packet, a four-hop path with a jittery cable link, and so on), so each
+situation can be shown on demand. Its header
 says how to run it to regenerate the images. The odd stray reply far above
 the bands is the simulator's own timing noise.
 

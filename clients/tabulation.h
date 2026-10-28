@@ -29,12 +29,23 @@ struct ViewWindow {
   int columns;
   int rows;
   double max_rtt;     // RTT at the top of the graph, seconds
+  // Log scale: the vertical axis is logarithmic from min_rtt (the bottom
+  // edge) to max_rtt. Linear scale: from 0 to max_rtt, and min_rtt is unused.
+  bool log_scale;
+  double min_rtt;
 
   bool operator==(const ViewWindow& other) const;
 };
 
-// The largest RTT of any reply sent within [start, end). 0 if none.
+// Where `rtt` sits on the vertical axis: 0 = bottom edge, 1 = top edge
+// (clamped). Everything that maps RTTs to pixels or rows goes through these
+// two, so linear and log scale can't drift apart.
+double rtt_to_fraction(const ViewWindow& window, double rtt);
+double fraction_to_rtt(const ViewWindow& window, double fraction);
+
+// The largest / smallest RTT of any reply sent within [start, end). 0 if none.
 double max_rtt_in_window(const TargetHistory& history, double start, double end);
+double min_rtt_in_window(const TargetHistory& history, double start, double end);
 
 // Everything the summary statistics need, for all flows or for one.
 struct FlowStats {

@@ -5,7 +5,30 @@
 
 bool ViewWindow::operator==(const ViewWindow& other) const {
   return start == other.start && end == other.end && columns == other.columns &&
-         rows == other.rows && max_rtt == other.max_rtt;
+         rows == other.rows && max_rtt == other.max_rtt && log_scale == other.log_scale &&
+         min_rtt == other.min_rtt;
+}
+
+double rtt_to_fraction(const ViewWindow& window, double rtt) {
+  double fraction;
+  if (window.log_scale) {
+    if (rtt <= window.min_rtt) {
+      return 0.0;
+    }
+    fraction = log(rtt / window.min_rtt) / log(window.max_rtt / window.min_rtt);
+  } else {
+    fraction = rtt / window.max_rtt;
+  }
+  if (fraction < 0.0) fraction = 0.0;
+  if (fraction > 1.0) fraction = 1.0;
+  return fraction;
+}
+
+double fraction_to_rtt(const ViewWindow& window, double fraction) {
+  if (window.log_scale) {
+    return window.min_rtt * pow(window.max_rtt / window.min_rtt, fraction);
+  }
+  return fraction * window.max_rtt;
 }
 
 double max_rtt_in_window(const TargetHistory& history, double start, double end) {
@@ -21,6 +44,21 @@ double max_rtt_in_window(const TargetHistory& history, double start, double end)
     }
   }
   return max_rtt;
+}
+
+double min_rtt_in_window(const TargetHistory& history, double start, double end) {
+  const std::vector<Sample>& samples = history.get_samples();
+  double min_rtt = 0.0;
+  for (size_t i = history.first_index_at_or_after(start); i < samples.size(); i++) {
+    const Sample& sample = samples[i];
+    if (sample.send_time >= end) {
+      break;
+    }
+    if (sample.state == SAMPLE_REPLIED && (min_rtt == 0.0 || sample.rtt < min_rtt)) {
+      min_rtt = sample.rtt;
+    }
+  }
+  return min_rtt;
 }
 
 // ---------------------------------------------------------------------------
@@ -112,9 +150,6 @@ void Tabulation::build(const TargetHistory& history, const ViewWindow& window,
   largest_flow_bucket = 0;
 
   double epoch = (window.end - window.start) / columns;
-  // A hair above the max, so the largest reply lands in the top row rather
-  // than one past it.
-  double rtt_scale = rows / (window.max_rtt * 1.0001 + 1e-9);
 
   const std::vector<Sample>& samples = history.get_samples();
   for (size_t i = history.first_index_at_or_after(window.start); i < samples.size(); i++) {
@@ -150,7 +185,11 @@ void Tabulation::build(const TargetHistory& history, const ViewWindow& window,
       continue;
     }
 
-    int row = (int)(sample.rtt * rtt_scale);
+    // Rows are equal slices of the vertical axis - so on a log scale each
+    // row covers the same RATIO of RTTs, not the same number of ms. (The
+    // slowest reply maps to exactly 1.0, which would be one row past the top;
+    // the clamp below puts it in the top row.)
+    int row = (int)(rtt_to_fraction(window, sample.rtt) * rows);
     if (row < 0) row = 0;
     if (row >= rows) row = rows - 1;
     size_t cell_index = (size_t)column * rows + row;

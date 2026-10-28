@@ -265,6 +265,64 @@ void RowView::draw(ImDrawList* draw_list, const TargetHistory& history, const Ro
   draw_summary(draw_list, layout, frame);
 }
 
+// A round RTT for a grid label: "0.1ms", "2ms", "50ms", "200ms".
+static void format_round_ms(double seconds, char* out, size_t out_size) {
+  snprintf(out, out_size, "%gms", seconds * 1000.0);
+}
+
+// The log-scale grid. Latency lines go on the round values 1, 2 and 5 of
+// every power of ten between the bottom (min_rtt) and the top (max_rtt),
+// labeled on the left; the top edge is labeled with the true max. Loss isn't
+// logarithmic, so it gets its own short ticks on the right edge at 0, 20, ...
+// 100%, measured on the same linear scale as the loss bars.
+static void draw_log_grid(ImDrawList* draw_list, const RowLayout& layout,
+                          const ViewWindow& window) {
+  float inset_height = (float)(window.rows * CELL_HEIGHT);
+  float inset_bottom = layout.inset_min.y + inset_height;
+  char text[64];
+
+  // The true maximum, at the top.
+  format_ms(window.max_rtt, "", text, sizeof(text));
+  draw_outlined_text(draw_list, ImVec2(layout.graph_min.x + 2, layout.graph_min.y + 1),
+                     COLOR_LABEL, text, false, false);
+  float top_label_bottom = layout.graph_min.y + 1 + ImGui::GetTextLineHeight();
+
+  static const double STEPS[] = {1.0, 2.0, 5.0};
+  for (double decade = window.min_rtt; decade <= window.max_rtt; decade *= 10.0) {
+    for (int step = 0; step < 3; step++) {
+      double value = decade * STEPS[step];
+      if (value > window.max_rtt * 1.0000001) {
+        break;
+      }
+      float y = floorf(inset_bottom - (float)rtt_to_fraction(window, value) * inset_height);
+      if (value > window.min_rtt * 1.0000001) {
+        draw_list->AddLine(ImVec2(layout.graph_min.x, y + 0.5f),
+                           ImVec2(layout.graph_max.x, y + 0.5f), COLOR_GRID);
+      }
+      // Labels sit just above their line, and are skipped where they would
+      // collide with the max label at the top.
+      if (y - ImGui::GetTextLineHeight() - 1 >= top_label_bottom) {
+        format_round_ms(value, text, sizeof(text));
+        draw_outlined_text(draw_list, ImVec2(layout.graph_min.x + 2, y - 1), COLOR_LABEL, text,
+                           false, true);
+      }
+    }
+  }
+
+  for (int percent = 0; percent <= 100; percent += 20) {
+    float y = floorf(inset_bottom - inset_height * percent / 100.0f) + 0.5f;
+    draw_list->AddLine(ImVec2(layout.graph_max.x - 6, y), ImVec2(layout.graph_max.x, y),
+                       COLOR_LABEL);
+    snprintf(text, sizeof(text), "%d%%", percent);
+    float half = ImGui::GetTextLineHeight() / 2;
+    float label_y = y - half;
+    if (percent == 0) label_y = y - 2 * half;   // keep inside the graph
+    if (percent == 100) label_y = y;
+    draw_outlined_text(draw_list, ImVec2(layout.graph_max.x - 8, label_y), COLOR_LABEL, text,
+                       true, false);
+  }
+}
+
 void RowView::draw_graph(ImDrawList* draw_list, const RowLayout& layout,
                          const FrameContext& frame) const {
   const ViewWindow& window = frame.window;
@@ -302,22 +360,26 @@ void RowView::draw_graph(ImDrawList* draw_list, const RowLayout& layout,
     }
   }
 
-  // Horizontal grid with latency labels on the left and loss labels on the
-  // right.
   char text[96];
-  for (int division = 0; division < VERTICAL_LABEL_DIVISIONS; division++) {
-    double k = (double)division / VERTICAL_LABEL_DIVISIONS;
-    float y = floorf(layout.graph_min.y + (float)k * height);
-    if (division > 0) {
-      draw_list->AddLine(ImVec2(layout.graph_min.x, y + 0.5f), ImVec2(layout.graph_max.x, y + 0.5f),
-                         COLOR_GRID);
+  if (window.log_scale) {
+    draw_log_grid(draw_list, layout, window);
+  } else {
+    // Linear: five evenly spaced lines, latency labels on the left and loss
+    // labels on the right sharing them.
+    for (int division = 0; division < VERTICAL_LABEL_DIVISIONS; division++) {
+      double k = (double)division / VERTICAL_LABEL_DIVISIONS;
+      float y = floorf(layout.graph_min.y + (float)k * height);
+      if (division > 0) {
+        draw_list->AddLine(ImVec2(layout.graph_min.x, y + 0.5f),
+                           ImVec2(layout.graph_max.x, y + 0.5f), COLOR_GRID);
+      }
+      format_ms((1.0 - k) * window.max_rtt, "", text, sizeof(text));
+      draw_outlined_text(draw_list, ImVec2(layout.graph_min.x + 2, y + 1), COLOR_LABEL, text,
+                         false, false);
+      snprintf(text, sizeof(text), "%.1f%%", (1.0 - k) * 100.0);
+      draw_outlined_text(draw_list, ImVec2(layout.graph_max.x - 2, y + 1), COLOR_LABEL, text,
+                         true, false);
     }
-    format_ms((1.0 - k) * window.max_rtt, "", text, sizeof(text));
-    draw_outlined_text(draw_list, ImVec2(layout.graph_min.x + 2, y + 1), COLOR_LABEL, text, false,
-                       false);
-    snprintf(text, sizeof(text), "%.1f%%", (1.0 - k) * 100.0);
-    draw_outlined_text(draw_list, ImVec2(layout.graph_max.x - 2, y + 1), COLOR_LABEL, text, true,
-                       false);
   }
 
   // Vertical time grid. The lines sit on round local clock times (every 30
@@ -359,7 +421,7 @@ void RowView::draw_graph(ImDrawList* draw_list, const RowLayout& layout,
     draw_list->AddLine(ImVec2(x, layout.graph_min.y), ImVec2(x, layout.graph_max.y),
                        COLOR_CROSSHAIR);
 
-    double latency = (1.0 - frame.crosshair_y) * window.max_rtt;
+    double latency = fraction_to_rtt(window, 1.0 - frame.crosshair_y);
     double when = window.start + frame.crosshair_x * span;
     time_t when_seconds = (time_t)when;
     struct tm local;

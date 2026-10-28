@@ -20,7 +20,9 @@
 // drag scrubs through time: the epoch you grabbed stays under the mouse.
 // End (or F) returns to following "now". The "View" button (or V) switches
 // the summary column between "combined" and "by flow"; in "by flow", clicking
-// a flow's histogram highlights that flow in the graph. Q or Escape quits.
+// a flow's histogram highlights that flow in the graph. The "Scale" button
+// (or L) switches the RTT axis between linear and logarithmic. Q or Escape
+// quits.
 
 #include "daemon_link.h"
 #include "row_view.h"
@@ -237,6 +239,8 @@ int main(int argc, char* argv[]) {
   bool dragging = false;
   // "combined" (one summary histogram per row) or "by flow" (one per flow).
   bool by_flow = false;
+  // Vertical axis: linear from 0, or logarithmic.
+  bool log_scale = false;
   double drag_anchor_time = 0.0;
   while (!done) {
     // ---- 1. Events. Sleep up to 50 ms waiting for one: the data only
@@ -256,6 +260,8 @@ int main(int argc, char* argv[]) {
           timeline.follow();
         } else if (key == SDLK_v) {
           by_flow = !by_flow;
+        } else if (key == SDLK_l) {
+          log_scale = !log_scale;
         }
       }
       have_event = SDL_PollEvent(&event) != 0;
@@ -319,14 +325,31 @@ int main(int argc, char* argv[]) {
     view.rows = bucket_rows;
     timeline.compute_window(now, columns, &view.start, &view.end);
     view.max_rtt = 0.0;
+    double fastest = 0.0;
     for (size_t i = 0; i < histories.size(); i++) {
       double row_max = max_rtt_in_window(*histories[i], view.start, view.end);
       if (row_max > view.max_rtt) {
         view.max_rtt = row_max;
       }
+      double row_min = min_rtt_in_window(*histories[i], view.start, view.end);
+      if (row_min > 0.0 && (fastest == 0.0 || row_min < fastest)) {
+        fastest = row_min;
+      }
     }
+    view.log_scale = log_scale;
     if (view.max_rtt <= 0.0) {
-      view.max_rtt = 0.1;   // no replies on screen: show a sane 100 ms scale
+      // No replies on screen: show a sane scale - 0..100 ms linear, 1..100 ms
+      // log.
+      view.max_rtt = 0.1;
+      view.min_rtt = 0.001;
+    } else {
+      // The bottom of the log scale: the largest power of ten strictly below
+      // the fastest reply on screen (80 ms -> 10 ms, 8 ms -> 1 ms, 10 ms ->
+      // 1 ms). Unused in linear mode.
+      view.min_rtt = pow(10.0, ceil(log10(fastest)) - 1.0);
+    }
+    if (!log_scale) {
+      view.min_rtt = 0.0;   // unused; keeps the fastest reply from forcing re-tabulation
     }
 
     // ---- 5. Crosshair and zoom: is the mouse over any row's cell grid? ----
@@ -397,20 +420,35 @@ int main(int argc, char* argv[]) {
       }
     }
 
-    // The View button, top right. A real button (not just the V key) so the
-    // mode can be discovered; its tooltip names the shortcut.
+    // The View and Scale buttons, top right. Real buttons (not just the V
+    // and L keys) so the modes can be discovered; their tooltips name the
+    // shortcuts.
     const char* view_label = by_flow ? "View: by flow" : "View: combined";
-    float button_width = ImGui::CalcTextSize("View: combined").x + 12;
+    const char* scale_label = log_scale ? "Scale: log" : "Scale: linear";
+    float view_width = ImGui::CalcTextSize("View: combined").x + 12;
+    float scale_width = ImGui::CalcTextSize("Scale: linear").x + 12;
+    float button_gap = 6.0f;
+    float controls_width = view_width + button_gap + scale_width;
     // Small enough to sit in the first row's status line, clear of the graph.
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 1));
-    ImGui::SetNextWindowPos(ImVec2(display_width - margin - button_width - 12, margin));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(button_gap, 0));
+    ImGui::SetNextWindowPos(ImVec2(display_width - margin - controls_width - 12, margin));
     ImGui::SetNextWindowBgAlpha(0.0f);
     ImGui::Begin("controls", NULL,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
                      ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove);
-    if (ImGui::Button(view_label, ImVec2(button_width, 0))) {
+    if (ImGui::Button(scale_label, ImVec2(scale_width, 0))) {
+      log_scale = !log_scale;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("RTT axis: linear from 0, or logarithmic - which keeps\n"
+                        "fast and slow rows readable on one shared scale.\n"
+                        "Shortcut: L");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(view_label, ImVec2(view_width, 0))) {
       by_flow = !by_flow;
       frame.by_flow = by_flow;
     }
@@ -420,7 +458,7 @@ int main(int argc, char* argv[]) {
                         "Shortcut: V");
     }
     ImGui::End();
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar(3);
 
     // ---- 6. Tabulate all rows, find the fullest cell anywhere, then color
     // and draw. ----
@@ -437,9 +475,9 @@ int main(int argc, char* argv[]) {
       rows[i]->draw(draw_list, *histories[i], layouts[i], frame);
     }
     if (!timeline.is_following()) {
-      // Just left of the View button.
+      // Just left of the buttons.
       draw_outlined_text(draw_list,
-                         ImVec2(display_width - margin - button_width - 24, margin + 1),
+                         ImVec2(display_width - margin - controls_width - 24, margin + 1),
                          IM_COL32(255, 255, 96, 255), "viewing history - End to follow", true,
                          false);
     }
