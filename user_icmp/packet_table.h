@@ -21,11 +21,14 @@
 
 #include <map>
 #include <stdint.h>
+#include <vector>
 
 struct OutstandingPacket {
   int target_id;
   uint64_t full_sequence;    // the 64-bit sequence number the client sees
   int flow;                  // 0..K-1, or -1 if the target doesn't use flows
+  bool is_probe;             // a TTL-limited route probe rather than a ping
+  int ttl;                   // probes only: the TTL it was sent with
   double send_monotonic;     // for RTT
   double send_realtime;      // for reporting
 };
@@ -40,8 +43,12 @@ public:
   // already answered - i.e. a duplicate - or already expired).
   bool take(uint16_t identifier, uint16_t sequence, OutstandingPacket* packet);
 
-  // Drops entries older than expiry_seconds. Cheap enough to call every loop.
-  void expire(double now_monotonic);
+  // Drops pings older than expiry_seconds. Probes are dropped sooner - after
+  // probe_timeout - and handed back in *expired_probes, because an
+  // unanswered probe is itself a result (a "*" hop). Cheap enough to call
+  // every loop.
+  void expire(double now_monotonic, double probe_timeout,
+              std::vector<OutstandingPacket>* expired_probes);
 
   // Drops every entry belonging to a target that has gone away.
   void remove_target(int target_id);

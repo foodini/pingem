@@ -19,8 +19,10 @@ static const int FUDGE_LENGTH = 2;
 static const int ICMP_HEADER_LENGTH = 8;
 static const uint8_t ICMP_TYPE_ECHO_REPLY = 0;
 static const uint8_t ICMP_TYPE_ECHO_REQUEST = 8;
+static const uint8_t ICMP_TYPE_DESTINATION_UNREACHABLE = 3;
+static const uint8_t ICMP_TYPE_TIME_EXCEEDED = 11;
 
-IcmpSocket::IcmpSocket() : fd(-1), drained(true) {
+IcmpSocket::IcmpSocket() : fd(-1), drained(true), current_ttl(0) {
 }
 
 IcmpSocket::~IcmpSocket() {
@@ -38,10 +40,12 @@ bool IcmpSocket::open_socket() {
   // Every raw ICMP socket on Linux receives a copy of EVERY incoming ICMP
   // packet on the machine. ICMP_FILTER lets the kernel discard the types we
   // don't care about before they're copied to us. The filter is a bitmask of
-  // types to *block*. For now we only want echo replies; Time Exceeded (11)
-  // and Destination Unreachable (3) get unblocked when route probing lands.
+  // types to *block*. We want echo replies, plus the two errors that can
+  // come back about our echo requests: Destination Unreachable and Time
+  // Exceeded (the answer to a TTL-limited probe).
   struct icmp_filter filter;
-  filter.data = ~(1U << ICMP_TYPE_ECHO_REPLY);
+  filter.data = ~((1U << ICMP_TYPE_ECHO_REPLY) | (1U << ICMP_TYPE_DESTINATION_UNREACHABLE) |
+                  (1U << ICMP_TYPE_TIME_EXCEEDED));
   if (setsockopt(fd, SOL_RAW, ICMP_FILTER, &filter, sizeof(filter)) < 0) {
     log_message("warning: ICMP_FILTER failed (%s); continuing unfiltered", strerror(errno));
   }
@@ -82,7 +86,8 @@ static uint16_t ones_add(uint16_t a, uint16_t b) {
 }
 
 int IcmpSocket::send_echo(const struct in_addr& destination, uint16_t identifier,
-                          uint16_t sequence, int packet_size, int fixed_checksum) {
+                          uint16_t sequence, int packet_size, int fixed_checksum,
+                          int ttl) {
   if (packet_size < MIN_PACKET_SIZE) {
     packet_size = MIN_PACKET_SIZE;
   }
@@ -129,6 +134,15 @@ int IcmpSocket::send_echo(const struct in_addr& destination, uint16_t identifier
     p[FUDGE_OFFSET + 1] = (unsigned char)(fudge & 0xff);
   }
 
+  // TTL is a socket option, so it's set per send - but only when it changes,
+  // since pings (default TTL) and probes (small TTLs) interleave.
+  int wanted_ttl = (ttl > 0) ? ttl : 64;
+  if (wanted_ttl != current_ttl) {
+    if (setsockopt(fd, IPPROTO_IP, IP_TTL, &wanted_ttl, sizeof(wanted_ttl)) == 0) {
+      current_ttl = wanted_ttl;
+    }
+  }
+
   struct sockaddr_in to;
   memset(&to, 0, sizeof(to));
   to.sin_family = AF_INET;
@@ -145,7 +159,18 @@ bool IcmpSocket::is_drained() const {
   return drained;
 }
 
-bool IcmpSocket::receive_echo_reply(EchoReply* reply) {
+// Reads one packet. The interesting cases:
+//
+//   Echo reply:   [IP header][ICMP type 0, id, seq][magic ...]
+//   ICMP error:   [IP header][ICMP type 3 or 11, code][4 unused bytes]
+//                 [the IP header of OUR packet][first 8+ bytes of OUR ICMP]
+//
+// For an error, the router quotes back the start of the packet that caused
+// it. RFC 792 only guarantees 8 bytes past the quoted IP header - exactly our
+// ICMP header, with the identifier and sequence number - so that's all we
+// use. The magic string usually isn't quoted, so errors are matched purely
+// by (identifier, sequence) in the caller's packet table.
+bool IcmpSocket::receive_message(IcmpMessage* message) {
   drained = false;
   ssize_t length = recv(fd, receive_buffer, sizeof(receive_buffer), 0);
   // Take the timestamps immediately, before any parsing.
@@ -163,29 +188,59 @@ bool IcmpSocket::receive_echo_reply(EchoReply* reply) {
   }
 
   // A raw IPv4 socket hands us the IP header too. Its length is variable
-  // (IHL field, in 32-bit words) - the old Python assumed 20 bytes.
+  // (IHL field, in 32-bit words).
   if (length < 20) {
     return false;
   }
   const struct iphdr* ip = (const struct iphdr*)receive_buffer;
   int ip_header_length = ip->ihl * 4;
-  if (ip_header_length < 20 || length < ip_header_length + ICMP_HEADER_LENGTH + MAGIC_LENGTH) {
+  if (ip_header_length < 20 || length < ip_header_length + ICMP_HEADER_LENGTH) {
     return false;
   }
-
   const unsigned char* icmp = receive_buffer + ip_header_length;
-  if (icmp[0] != ICMP_TYPE_ECHO_REPLY || icmp[1] != 0) {
-    return false;
-  }
-  if (memcmp(icmp + ICMP_HEADER_LENGTH, MAGIC, MAGIC_LENGTH) != 0) {
-    return false;  // somebody else's ping (e.g. /usr/bin/ping) - not ours
+  int icmp_length = (int)length - ip_header_length;
+
+  message->source.s_addr = ip->saddr;
+  message->ttl = ip->ttl;
+  message->receive_monotonic = now_monotonic;
+  message->receive_realtime = now_realtime;
+
+  if (icmp[0] == ICMP_TYPE_ECHO_REPLY) {
+    if (icmp[1] != 0 || icmp_length < ICMP_HEADER_LENGTH + MAGIC_LENGTH ||
+        memcmp(icmp + ICMP_HEADER_LENGTH, MAGIC, MAGIC_LENGTH) != 0) {
+      return false;  // somebody else's ping (e.g. /usr/bin/ping) - not ours
+    }
+    message->kind = ICMP_ECHO_REPLY;
+    message->identifier = (uint16_t)((icmp[4] << 8) | icmp[5]);
+    message->sequence = (uint16_t)((icmp[6] << 8) | icmp[7]);
+    message->error_type = 0;
+    message->error_code = 0;
+    return true;
   }
 
-  reply->source.s_addr = ip->saddr;
-  reply->identifier = (uint16_t)((icmp[4] << 8) | icmp[5]);
-  reply->sequence = (uint16_t)((icmp[6] << 8) | icmp[7]);
-  reply->ttl = ip->ttl;
-  reply->receive_monotonic = now_monotonic;
-  reply->receive_realtime = now_realtime;
+  if (icmp[0] != ICMP_TYPE_DESTINATION_UNREACHABLE && icmp[0] != ICMP_TYPE_TIME_EXCEEDED) {
+    return false;
+  }
+  // The quoted packet starts after the 8-byte error header.
+  const unsigned char* quoted = icmp + ICMP_HEADER_LENGTH;
+  int quoted_length = icmp_length - ICMP_HEADER_LENGTH;
+  if (quoted_length < 20) {
+    return false;
+  }
+  const struct iphdr* quoted_ip = (const struct iphdr*)quoted;
+  int quoted_ip_header_length = quoted_ip->ihl * 4;
+  if (quoted_ip_header_length < 20 || quoted_ip->protocol != IPPROTO_ICMP ||
+      quoted_length < quoted_ip_header_length + ICMP_HEADER_LENGTH) {
+    return false;
+  }
+  const unsigned char* quoted_icmp = quoted + quoted_ip_header_length;
+  if (quoted_icmp[0] != ICMP_TYPE_ECHO_REQUEST) {
+    return false;  // an error about something other than a ping
+  }
+  message->kind = ICMP_ERROR;
+  message->error_type = icmp[0];
+  message->error_code = icmp[1];
+  message->identifier = (uint16_t)((quoted_icmp[4] << 8) | quoted_icmp[5]);
+  message->sequence = (uint16_t)((quoted_icmp[6] << 8) | quoted_icmp[7]);
   return true;
 }

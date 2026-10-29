@@ -3,7 +3,7 @@ CXXFLAGS ?= -O2 -g
 CXXFLAGS += -std=c++11 -Wall -Wextra
 LDLIBS   += -lanl   # getaddrinfo_a()
 
-OBJECTS = main.o daemon.o icmp_socket.o packet_table.o resolver.o http.o common.o protocol.o
+OBJECTS = main.o daemon.o icmp_socket.o packet_table.o resolver.o common.o protocol.o
 
 user_icmp: $(OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $(OBJECTS) $(LDLIBS)

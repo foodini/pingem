@@ -5,4 +5,16 @@
   see how their network connections were behaving (maybe they feel they need to
   change providers) would love to know where the blame for their latency and
   loss issues goes.
-
+* Mousing over a loss event (a run of lost packets) should give per-event
+  info: start time, duration, loss percentage over that span, and anything
+  else interesting about the event.
+* In the "by flow" view, merge the histograms of flows whose routes are
+  identical, since they're really one path.
+* A map view of the routers' locations (geolocation), alongside the route
+  graph.
+* When the route graph's layout is redone (new routes, or hosts added or
+  removed), morph the nodes to their new places over a second or two instead
+  of jumping, so the eye can follow.
+* Add an estimated per-hop time to each line on the map?
+* All-routes map: fit the whole map on screen in a tiny layout, with the
+  area around the mouse magnified (a fisheye), instead of dragging.

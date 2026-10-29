@@ -23,6 +23,33 @@ bool DaemonLink::is_connected() const {
   return fd >= 0;
 }
 
+void DaemonLink::set_probe_rate(int id, double rate) {
+  for (size_t i = 0; i < targets.size(); i++) {
+    if (targets[i].id == id) {
+      if (targets[i].probe_rate == rate) {
+        return;
+      }
+      targets[i].probe_rate = rate;
+      if (fd >= 0) {
+        output += format_probe(id, rate);
+      }
+      return;
+    }
+  }
+}
+
+void DaemonLink::remove_target(int id) {
+  for (size_t i = 0; i < targets.size(); i++) {
+    if (targets[i].id == id) {
+      targets.erase(targets.begin() + i);
+      if (fd >= 0) {
+        output += format_remove(id);
+      }
+      return;
+    }
+  }
+}
+
 bool DaemonLink::try_connect() {
   int new_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (new_fd < 0) {
@@ -50,7 +77,7 @@ bool DaemonLink::try_connect() {
   output.clear();
   for (size_t i = 0; i < targets.size(); i++) {
     output += format_add(targets[i].id, targets[i].host, targets[i].interval,
-                         targets[i].packet_size, targets[i].flows);
+                         targets[i].packet_size, targets[i].flows, targets[i].probe_rate);
   }
   return true;
 }
@@ -150,6 +177,9 @@ void DaemonLink::handle_line(const std::string& line, std::vector<LinkEvent>* ev
   event.rtt = 0.0;
   event.ttl = 0;
   event.flow = -1;
+  event.error_type = 0;
+  event.error_code = -1;
+  event.reached = false;
 
   if (message.verb == "hello") {
     if (message.args.size() < 2 || atoi(message.args[1].c_str()) != PROTOCOL_VERSION) {
@@ -184,6 +214,29 @@ void DaemonLink::handle_line(const std::string& line, std::vector<LinkEvent>* ev
       get_field(message, "flow", &event.flow);
       events->push_back(event);
     }
+  } else if (message.verb == "unreachable") {
+    event.type = LINK_UNREACHABLE;
+    if (get_field(message, "seq", &event.seq) && get_field(message, "t", &event.time) &&
+        get_field(message, "type", &event.error_type)) {
+      get_field(message, "code", &event.error_code);
+      get_field(message, "from", &event.address);
+      get_field(message, "flow", &event.flow);
+      events->push_back(event);
+    }
+  } else if (message.verb == "hop") {
+    event.type = LINK_HOP;
+    if (get_field(message, "flow", &event.flow) && get_field(message, "ttl", &event.ttl) &&
+        get_field(message, "t", &event.time) && get_field(message, "from", &event.address)) {
+      if (event.address == "*" || !get_field(message, "rtt", &event.rtt)) {
+        event.rtt = -1.0;
+        event.address = "*";
+      }
+      int reached = 0;
+      get_field(message, "reached", &reached);
+      event.reached = reached != 0;
+      get_field(message, "code", &event.error_code);
+      events->push_back(event);
+    }
   } else if (message.verb == "added") {
     event.type = LINK_ADDED;
     if (message.args.size() >= 3) {
@@ -195,5 +248,5 @@ void DaemonLink::handle_line(const std::string& line, std::vector<LinkEvent>* ev
     event.text = message.text;
     events->push_back(event);
   }
-  // "removed" needs no action yet: the GUI never removes targets.
+  // "removed" needs no action: the GUI forgets a target as soon as it asks.
 }

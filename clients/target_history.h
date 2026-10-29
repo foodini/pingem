@@ -3,7 +3,10 @@
 //
 // One Sample per ping the daemon sent. A sample starts PENDING when the "ping"
 // event arrives, and is resolved exactly once: REPLIED when its reply arrives,
-// or LOST when it's been outstanding longer than the loss timeout.
+// UNREACHABLE when a router answers it with an ICMP error instead, or LOST
+// when it's been outstanding longer than the loss timeout. UNREACHABLE counts
+// as loss everywhere - the packet didn't get there - but is also counted on
+// its own, because "refused" and "vanished" are different problems.
 //
 // Samples are stored in send order, and send times only increase, so the
 // samples for any time window are one contiguous slice of the vector, found
@@ -28,8 +31,14 @@ enum SampleState {
   SAMPLE_PENDING,
   SAMPLE_REPLIED,
   SAMPLE_LOST,
-  SAMPLE_ABANDONED
+  SAMPLE_ABANDONED,
+  SAMPLE_UNREACHABLE
 };
+
+// A few words for an ICMP error about one of our pings: "host unreachable",
+// "TTL ran out (a routing loop?)", "too big for a link (fragmentation
+// needed)".
+std::string describe_icmp_error(int type, int code);
 
 struct Sample {
   double send_time;     // wall-clock seconds, from the daemon
@@ -47,6 +56,8 @@ public:
   void on_error(const std::string& text);
   void on_ping(uint64_t seq, double send_time, int flow);
   void on_reply(uint64_t seq, double receive_time, double rtt, int ttl, const std::string& from);
+  void on_unreachable(uint64_t seq, double receive_time, const std::string& from, int type,
+                      int code);
   void on_session_end();
 
   // Marks samples LOST once they've waited longer than `timeout` seconds.

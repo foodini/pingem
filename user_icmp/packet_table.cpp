@@ -22,12 +22,17 @@ bool PacketTable::take(uint16_t identifier, uint16_t sequence, OutstandingPacket
   return true;
 }
 
-void PacketTable::expire(double now_monotonic) {
+void PacketTable::expire(double now_monotonic, double probe_timeout,
+                         std::vector<OutstandingPacket>* expired_probes) {
   // A linear scan. The table holds roughly (send rate * expiry) entries - a
   // few hundred in normal use - so this is not worth anything cleverer.
   std::map<uint32_t, OutstandingPacket>::iterator it = packets.begin();
   while (it != packets.end()) {
-    if (now_monotonic - it->second.send_monotonic > expiry_seconds) {
+    double age = now_monotonic - it->second.send_monotonic;
+    if (it->second.is_probe && age > probe_timeout) {
+      expired_probes->push_back(it->second);
+      packets.erase(it++);
+    } else if (age > expiry_seconds) {
       packets.erase(it++);
     } else {
       ++it;

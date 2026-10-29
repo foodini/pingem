@@ -72,6 +72,54 @@ void TargetHistory::on_reply(uint64_t seq, double receive_time, double rtt, int 
   status = line;
 }
 
+std::string describe_icmp_error(int type, int code) {
+  char text[96];
+  if (type == 11) {
+    // Pings go out with a full TTL (64), so running out means the packet
+    // went round in circles.
+    return "TTL ran out (a routing loop?)";
+  }
+  if (type != 3) {
+    snprintf(text, sizeof(text), "ICMP error type %d code %d", type, code);
+    return text;
+  }
+  switch (code) {
+    case 0: return "network unreachable";
+    case 1: return "host unreachable";
+    case 2: return "protocol unreachable";
+    case 3: return "port unreachable";
+    case 4: return "too big for a link (fragmentation needed) - try a smaller --size";
+    case 6: return "destination network unknown";
+    case 7: return "destination host unknown";
+    case 9:
+    case 10:
+    case 13: return "administratively prohibited (a firewall)";
+    default:
+      snprintf(text, sizeof(text), "destination unreachable (code %d)", code);
+      return text;
+  }
+}
+
+void TargetHistory::on_unreachable(uint64_t seq, double receive_time, const std::string& from,
+                                   int type, int code) {
+  size_t index = session_base + (size_t)(seq - 1);
+  if (index >= samples.size()) {
+    return;
+  }
+  Sample& sample = samples[index];
+  if (sample.state != SAMPLE_PENDING) {
+    return;   // same rule as replies: once resolved, never changed
+  }
+  sample.state = SAMPLE_UNREACHABLE;
+  version++;
+
+  char line[512];
+  snprintf(line, sizeof(line), "%s: icmp_seq #%llu refused by %s at %.2f: %s", name.c_str(),
+           (unsigned long long)seq, from.c_str(), receive_time,
+           describe_icmp_error(type, code).c_str());
+  status = line;
+}
+
 void TargetHistory::on_session_end() {
   for (size_t i = oldest_pending; i < samples.size(); i++) {
     if (samples[i].state == SAMPLE_PENDING) {

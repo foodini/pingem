@@ -32,7 +32,7 @@ const int CELL_HEIGHT = 3;
 // Things every row needs to agree on, computed once per frame.
 struct FrameContext {
   ViewWindow window;
-  bool by_flow;                // summary split per flow, selection highlighting on
+  bool by_flow;                // summary split per flow
   double now;                  // wall clock, seconds
   int largest_cell;            // across ALL rows, so colors are comparable
   bool crosshair_visible;
@@ -57,7 +57,10 @@ public:
 
   // Per frame, in this order: tabulate() every row, then work out the
   // largest cell across all rows, then update_texture() and draw() each row.
-  void tabulate(const TargetHistory& history, const ViewWindow& window, bool by_flow);
+  // `show_selection`: highlight the selected flows (in "by flow" mode, or
+  // while this row's route graph is open); otherwise the selection is kept
+  // but not shown.
+  void tabulate(const TargetHistory& history, const ViewWindow& window, bool show_selection);
   void update_texture(const FrameContext& frame);
   void draw(ImDrawList* draw_list, const TargetHistory& history, const RowLayout& layout,
             const FrameContext& frame) const;
@@ -68,8 +71,11 @@ public:
   // flow. Returns which strip `point` is over, or -1.
   int flow_strip_at(const RowLayout& layout, ImVec2 point, int flow_count) const;
   // Clicking a strip selects that flow; clicking it again clears the
-  // selection. The selected flow is drawn at full brightness, the rest dimmed.
+  // selection. Selected flows are drawn at full brightness, the rest dimmed.
   void toggle_flow(int flow);
+  // The route graph selects every flow on a link at once.
+  void set_selection(FlowMask selection);
+  FlowMask get_selection() const;
   // One line about a flow, for the tooltip over its strip.
   void describe_flow(int flow, char* out, size_t out_size) const;
 
@@ -85,8 +91,8 @@ private:
   int texture_columns;
   int texture_rows;
   int colored_with_largest;    // largest_cell used for the current texture
-  int colored_with_highlight;  // selected flow the texture was colored for (-1 none)
-  int selected_flow;           // -1 = none
+  FlowMask colored_with_highlight;   // the selection the texture was colored for
+  FlowMask selection;          // 0 = none
   std::vector<uint32_t> pixels;
 };
 
@@ -94,5 +100,14 @@ private:
 // did the same with strokeText.)
 void draw_outlined_text(ImDrawList* draw_list, ImVec2 position, ImU32 color, const char* text,
                         bool align_right, bool align_bottom);
+
+// The vertical clock-time grid and its labels (at the bottom), for a box
+// whose cells start at inset_x and span inset_width.
+void draw_time_grid(ImDrawList* draw_list, ImVec2 box_min, ImVec2 box_max, float inset_x,
+                    float inset_width, const ViewWindow& window, double now);
+
+// Milliseconds with as many decimals as are useful: "0.312ms", "4.25ms",
+// "38.1ms". `suffix` is appended.
+void format_ms(double seconds, const char* suffix, char* out, size_t out_size);
 
 #endif

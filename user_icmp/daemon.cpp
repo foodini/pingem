@@ -1,7 +1,6 @@
 #include "daemon.h"
 
 #include "common.h"
-#include "http.h"
 
 #include <errno.h>
 #include <math.h>
@@ -12,12 +11,10 @@
 #include <time.h>
 #include <unistd.h>
 
-Daemon::Daemon(const DaemonConfig& config, IcmpSocket* icmp_socket, int tcp_listen_fd,
-               int unix_listen_fd)
+Daemon::Daemon(const DaemonConfig& config, IcmpSocket* icmp_socket, int listen_fd)
     : config(config),
       icmp_socket(icmp_socket),
-      tcp_listen_fd(tcp_listen_fd),
-      unix_listen_fd(unix_listen_fd),
+      listen_fd(listen_fd),
       packet_table(config.reply_expiry),
       next_target_id(1) {
   // Start identifiers at a random point so two daemons (or a daemon restarted
@@ -30,20 +27,19 @@ Daemon::Daemon(const DaemonConfig& config, IcmpSocket* icmp_socket, int tcp_list
 // ---------------------------------------------------------------------------
 
 void Daemon::run() {
-  log_message("user_icmp listening on 127.0.0.1:%d and @%s", config.port,
-              USER_ICMP_SOCKET_NAME);
+  log_message("user_icmp listening on @%s", USER_ICMP_SOCKET_NAME);
 
   std::vector<struct pollfd> poll_fds;
-  // The fd of each client entry in poll_fds, parallel to it from index 3 on.
+  // The fd of each client entry in poll_fds, parallel to it from index 2 on.
   std::vector<int> poll_client_fds;
-  const size_t FIRST_CLIENT_INDEX = 3;
+  const size_t FIRST_CLIENT_INDEX = 2;
 
   while (true) {
     double now = monotonic_now();
     send_due_packets(now);
     check_resolutions();
     resolver.reap();
-    packet_table.expire(now);
+    expire_packets(now);
     close_marked_clients();
 
     poll_fds.clear();
@@ -54,9 +50,7 @@ void Daemon::run() {
     entry.events = POLLIN;
     entry.fd = icmp_socket->get_fd();   // [0]
     poll_fds.push_back(entry);
-    entry.fd = tcp_listen_fd;           // [1]
-    poll_fds.push_back(entry);
-    entry.fd = unix_listen_fd;          // [2]
+    entry.fd = listen_fd;               // [1]
     poll_fds.push_back(entry);
 
     for (std::map<int, Client*>::iterator it = clients.begin(); it != clients.end(); ++it) {
@@ -111,10 +105,7 @@ void Daemon::run() {
     }
 
     if (poll_fds[1].revents & POLLIN) {
-      accept_clients(tcp_listen_fd, HTTP_CLIENT);
-    }
-    if (poll_fds[2].revents & POLLIN) {
-      accept_clients(unix_listen_fd, LINE_CLIENT);
+      accept_clients();
     }
   }
 }
@@ -125,6 +116,12 @@ double Daemon::compute_poll_timeout(double now) {
   double timeout = 1.0;
   if (!schedule_by_time.empty()) {
     double until_next = schedule_by_time.begin()->first - now;
+    if (until_next < timeout) {
+      timeout = until_next;
+    }
+  }
+  if (!probe_schedule_by_time.empty()) {
+    double until_next = probe_schedule_by_time.begin()->first - now;
     if (until_next < timeout) {
       timeout = until_next;
     }
@@ -157,6 +154,23 @@ void Daemon::send_due_packets(double now) {
     send_one(target);
     schedule(target);
   }
+
+  while (!probe_schedule_by_time.empty() && probe_schedule_by_time.begin()->first <= now) {
+    double due = probe_schedule_by_time.begin()->first;
+    int target_id = probe_schedule_by_time.begin()->second;
+    probe_schedule_by_time.erase(probe_schedule_by_time.begin());
+
+    std::map<int, Target*>::iterator found = targets.find(target_id);
+    if (found == targets.end()) {
+      continue;
+    }
+    Target* target = found->second;
+    if (target->next_probe_time != due) {
+      continue;  // stale: the probe rate changed after this was queued
+    }
+    send_probe(target);
+    schedule_probe(target);
+  }
 }
 
 void Daemon::send_one(Target* target) {
@@ -176,8 +190,11 @@ void Daemon::send_one(Target* target) {
   packet.send_realtime = realtime_now();
   packet.send_monotonic = monotonic_now();
 
+  packet.is_probe = false;
+  packet.ttl = 0;
+
   int error = icmp_socket->send_echo(target->address, target->identifier, wire_sequence,
-                                     target->packet_size, fixed_checksum);
+                                     target->packet_size, fixed_checksum, 0);
   if (error != target->last_send_error) {
     if (error != 0) {
       log_message("target %d (%s): send failing: %s", target->id, target->name.c_str(),
@@ -215,6 +232,117 @@ void Daemon::schedule(Target* target) {
   schedule_by_time.insert(std::make_pair(target->next_send_time, target->id));
 }
 
+// Route probes.
+//
+// A probe is just an echo request with a small TTL, sent on one of the
+// target's flow checksums so that it follows exactly the path that flow's
+// pings take (this is the "Paris traceroute" idea: classic traceroute varies
+// the very header fields load balancers hash on, so its hops can come from
+// different paths and stitch together into a route that doesn't exist).
+//
+// Probing never bursts. Probes are spread evenly between the pings - with R
+// probes per interval, at 1/2R, 3/2R, 5/2R ... of the way from one ping to
+// the next - so the target sees a steady trickle and the pings themselves
+// stay undisturbed.
+
+int Daemon::probe_limit(Target* target, int flow) {
+  int known = target->destination_ttl[flow];
+  return known > 0 ? known : MAX_PROBE_TTL;
+}
+
+void Daemon::set_probe_rate(Target* target, double rate) {
+  if (!(rate > 0.0) || target->flows == 0) {
+    rate = 0.0;
+  }
+  if (rate > MAX_PROBE_RATE) {
+    rate = MAX_PROBE_RATE;
+  }
+  // The probes alone must not go faster than the fastest allowed ping rate.
+  if (rate > 0.0 && target->interval / rate < config.min_interval) {
+    rate = target->interval / config.min_interval;
+  }
+  target->probe_rate = rate;
+  if (rate == 0.0) {
+    target->next_probe_time = -1.0;   // any queued entry is now stale
+    return;
+  }
+  double period = target->interval / rate;
+  double gap = period < target->interval ? period : target->interval;
+  // next_send_time is the next ping; the first probe goes half a gap after.
+  target->next_probe_time = target->next_send_time + gap / 2.0;
+  probe_schedule_by_time.insert(std::make_pair(target->next_probe_time, target->id));
+}
+
+void Daemon::schedule_probe(Target* target) {
+  if (target->probe_rate <= 0.0) {
+    target->next_probe_time = -1.0;
+    return;
+  }
+  double period = target->interval / target->probe_rate;
+  target->next_probe_time += period;
+  double now = monotonic_now();
+  if (target->next_probe_time < now) {
+    double skips = ceil((now - target->next_probe_time) / period);
+    target->next_probe_time += skips * period;
+  }
+  probe_schedule_by_time.insert(std::make_pair(target->next_probe_time, target->id));
+}
+
+void Daemon::send_probe(Target* target) {
+  // Find the next (flow, ttl) in the rotation that's worth probing: every
+  // flow at TTL 1, every flow at TTL 2, ... skipping TTLs beyond where a
+  // flow is known to reach the target. TTL 1 is always worth probing, so
+  // this always finds something.
+  int highest = 1;
+  for (int f = 0; f < target->flows; f++) {
+    int limit = probe_limit(target, f);
+    if (limit > highest) {
+      highest = limit;
+    }
+  }
+  if (target->probe_ttl < 1 || target->probe_ttl > highest) {
+    target->probe_flow = 0;
+    target->probe_ttl = 1;
+  }
+  while (target->probe_ttl > probe_limit(target, target->probe_flow)) {
+    target->probe_flow++;
+    if (target->probe_flow >= target->flows) {
+      target->probe_flow = 0;
+      target->probe_ttl++;
+      if (target->probe_ttl > highest) {
+        target->probe_ttl = 1;
+      }
+    }
+  }
+  int flow = target->probe_flow;
+  int ttl = target->probe_ttl;
+
+  // Advance for next time.
+  target->probe_flow++;
+  if (target->probe_flow >= target->flows) {
+    target->probe_flow = 0;
+    target->probe_ttl++;
+  }
+
+  uint64_t full_sequence = target->next_probe_sequence++;
+  uint16_t wire_sequence = (uint16_t)(full_sequence & 0xffff);
+
+  OutstandingPacket packet;
+  packet.target_id = target->id;
+  packet.full_sequence = full_sequence;
+  packet.flow = flow;
+  packet.is_probe = true;
+  packet.ttl = ttl;
+  packet.send_realtime = realtime_now();
+  packet.send_monotonic = monotonic_now();
+
+  // A failed send just becomes a "*" hop after the timeout. The ping path
+  // already logs a dead network; no need to say it twice.
+  icmp_socket->send_echo(target->address, target->probe_identifier, wire_sequence,
+                         target->packet_size, target->flow_checksums[flow], ttl);
+  packet_table.insert(target->probe_identifier, wire_sequence, packet);
+}
+
 // ---------------------------------------------------------------------------
 // Step 2: DNS and target lifetime.
 // ---------------------------------------------------------------------------
@@ -235,10 +363,10 @@ static bool is_plausible_host(const std::string& name) {
   return true;
 }
 
-// Validates a request for a new target and starts resolving it. Used by both
-// client kinds. On failure, returns false with *error set.
+// Validates a request for a new target and starts resolving it. On failure,
+// returns false with *error set.
 bool Daemon::request_target(Client* client, int client_target_id, const std::string& name,
-                            double interval, int packet_size, int flows,
+                            double interval, int packet_size, int flows, double probe_rate,
                             std::string* error) {
   if (!is_plausible_host(name)) {
     *error = "bad address";
@@ -250,6 +378,14 @@ bool Daemon::request_target(Client* client, int client_target_id, const std::str
   }
   if (flows < 0 || flows > MAX_FLOWS) {
     *error = "bad flows";
+    return false;
+  }
+  if (!(probe_rate >= 0.0) || isinf(probe_rate)) {
+    *error = "bad probes";
+    return false;
+  }
+  if (probe_rate > 0.0 && flows == 0) {
+    *error = "probes need flows";
     return false;
   }
   if (client->targets_by_client_id.count(client_target_id) != 0 ||
@@ -278,6 +414,7 @@ bool Daemon::request_target(Client* client, int client_target_id, const std::str
   pending->interval = interval;
   pending->packet_size = packet_size;
   pending->flows = flows;
+  pending->probe_rate = probe_rate;
   pending->request = request;
   pending_adds.push_back(pending);
   return true;
@@ -307,11 +444,7 @@ void Daemon::check_resolutions() {
         log_message("client %d: cannot resolve '%s': %s", client->fd, pending->name.c_str(),
                     error.c_str());
         std::string message = "cannot resolve " + pending->name + ": " + error;
-        if (client->kind == HTTP_CLIENT) {
-          fail_http_client(client, 502, "Bad Gateway", message + "\n");
-        } else {
-          queue_output(client, format_error(pending->client_target_id, message));
-        }
+        queue_output(client, format_error(pending->client_target_id, message));
       }
     }
     delete pending;
@@ -392,21 +525,30 @@ void Daemon::start_target(PendingAdd* pending, Client* client, const struct in_a
   double stagger_window = target->interval < 1.0 ? target->interval : 1.0;
   target->next_send_time = monotonic_now() + 0.01 + drand48() * stagger_window;
 
+  // Probing state. The probe identifier is separate from the pings' so the
+  // two can never be confused.
+  target->probe_identifier = allocate_identifier();
+  target->next_probe_sequence = 1;
+  target->probe_rate = 0.0;
+  target->next_probe_time = -1.0;
+  target->probe_flow = 0;
+  target->probe_ttl = 1;
+  target->destination_ttl.assign(target->flows, 0);
+
   targets[target->id] = target;
   identifiers_in_use[target->identifier] = target->id;
+  identifiers_in_use[target->probe_identifier] = target->id;
+  set_probe_rate(target, pending->probe_rate);
   client->targets_by_client_id[target->client_target_id] = target->id;
   schedule_by_time.insert(std::make_pair(target->next_send_time, target->id));
 
-  if (client->kind == HTTP_CLIENT) {
-    queue_output(client, make_event_stream_headers());
-  } else {
-    queue_output(client, format_added(target->client_target_id, target->name,
-                                      target->address_text));
-  }
+  queue_output(client,
+               format_added(target->client_target_id, target->name, target->address_text));
 
-  log_message("client %d: target %d %s (%s) interval=%.3fs size=%d flows=%d id=%u", client->fd,
-              target->id, target->name.c_str(), target->address_text.c_str(), target->interval,
-              target->packet_size, target->flows, (unsigned)target->identifier);
+  log_message("client %d: target %d %s (%s) interval=%.3fs size=%d flows=%d probes=%g id=%u",
+              client->fd, target->id, target->name.c_str(), target->address_text.c_str(),
+              target->interval, target->packet_size, target->flows, target->probe_rate,
+              (unsigned)target->identifier);
 }
 
 void Daemon::destroy_target(Target* target) {
@@ -417,6 +559,7 @@ void Daemon::destroy_target(Target* target) {
     client_it->second->targets_by_client_id.erase(target->client_target_id);
   }
   identifiers_in_use.erase(target->identifier);
+  identifiers_in_use.erase(target->probe_identifier);
   packet_table.remove_target(target->id);
   // Its entry in schedule_by_time is left to fall out on its own.
   targets.erase(target->id);
@@ -424,23 +567,26 @@ void Daemon::destroy_target(Target* target) {
 }
 
 // ---------------------------------------------------------------------------
-// Step 5: receiving.
+// Steps 3 and 5: receiving, and giving up waiting.
 // ---------------------------------------------------------------------------
 
 void Daemon::drain_icmp_socket() {
   while (true) {
-    EchoReply reply;
-    if (!icmp_socket->receive_echo_reply(&reply)) {
+    IcmpMessage message;
+    if (!icmp_socket->receive_message(&message)) {
       if (icmp_socket->is_drained()) {
         return;
       }
       continue;  // consumed something that wasn't ours; keep going
     }
 
+    // Echo replies and errors both identify OUR packet by the identifier and
+    // sequence we sent (an error quotes the start of the packet it's about).
     OutstandingPacket packet;
-    if (!packet_table.take(reply.identifier, reply.sequence, &packet)) {
-      // Unknown: a duplicate, something that arrived after expiry, or a reply
-      // to another user_icmp instance (it shares our magic string).
+    if (!packet_table.take(message.identifier, message.sequence, &packet)) {
+      // Unknown: a duplicate, something that arrived after expiry, a reply
+      // to another user_icmp instance (it shares our magic string), or an
+      // error about somebody else's ping.
       continue;
     }
 
@@ -448,10 +594,77 @@ void Daemon::drain_icmp_socket() {
     if (target_it == targets.end()) {
       continue;
     }
+    if (packet.is_probe) {
+      handle_probe_answer(target_it->second, packet, message);
+    } else {
+      handle_ping_answer(target_it->second, packet, message);
+    }
+  }
+}
 
-    double rtt = reply.receive_monotonic - packet.send_monotonic;
-    emit_reply(target_it->second, packet.full_sequence, reply.receive_realtime, rtt, reply.ttl,
-               ipv4_to_string(reply.source), packet.flow);
+void Daemon::handle_ping_answer(Target* target, const OutstandingPacket& packet,
+                                const IcmpMessage& message) {
+  std::string from = ipv4_to_string(message.source);
+  if (message.kind == ICMP_ECHO_REPLY) {
+    double rtt = message.receive_monotonic - packet.send_monotonic;
+    emit_reply(target, packet.full_sequence, message.receive_realtime, rtt, message.ttl, from,
+               packet.flow);
+    return;
+  }
+  // An error about a ping: it was refused, not lost. Tell the client now
+  // rather than let it time out, so it can say who refused it and why.
+  emit_line(target, format_unreachable(target->client_target_id, packet.full_sequence,
+                                       message.receive_realtime, from, message.error_type,
+                                       message.error_code, packet.flow));
+}
+
+void Daemon::handle_probe_answer(Target* target, const OutstandingPacket& packet,
+                                 const IcmpMessage& message) {
+  int flow = packet.flow;
+  if (flow < 0 || flow >= target->flows) {
+    return;
+  }
+  double rtt = message.receive_monotonic - packet.send_monotonic;
+  std::string from = ipv4_to_string(message.source);
+  int& destination_ttl = target->destination_ttl[flow];
+
+  if (message.kind == ICMP_ECHO_REPLY || message.error_type == 3) {
+    // The probe got as far as it can go: to the target (echo reply), or to
+    // a router that says it can't be delivered (Destination Unreachable).
+    // Either way there's nothing to learn by probing this flow further, so
+    // that's where its rotation stops - from now on, until it changes.
+    if (destination_ttl == 0 || packet.ttl < destination_ttl) {
+      destination_ttl = packet.ttl;
+    }
+    bool reached = message.kind == ICMP_ECHO_REPLY;
+    emit_line(target, format_hop(target->client_target_id, flow, packet.ttl,
+                                 packet.send_realtime, rtt, from, reached,
+                                 reached ? -1 : message.error_code));
+    return;
+  }
+
+  // Time Exceeded: a router on the way. If this was a probe at the TTL we
+  // thought reached the target, the path has got longer - forget what we
+  // knew and probe further again.
+  if (destination_ttl != 0 && packet.ttl >= destination_ttl) {
+    destination_ttl = 0;
+  }
+  emit_line(target, format_hop(target->client_target_id, flow, packet.ttl, packet.send_realtime,
+                               rtt, from, false, -1));
+}
+
+void Daemon::expire_packets(double now) {
+  std::vector<OutstandingPacket> expired_probes;
+  packet_table.expire(now, config.probe_timeout, &expired_probes);
+  for (size_t i = 0; i < expired_probes.size(); i++) {
+    const OutstandingPacket& packet = expired_probes[i];
+    std::map<int, Target*>::iterator target_it = targets.find(packet.target_id);
+    if (target_it == targets.end()) {
+      continue;
+    }
+    Target* target = target_it->second;
+    emit_line(target, format_hop(target->client_target_id, packet.flow, packet.ttl,
+                                 packet.send_realtime, -1.0, "*", false, -1));
   }
 }
 
@@ -459,17 +672,21 @@ void Daemon::drain_icmp_socket() {
 // Events to clients.
 // ---------------------------------------------------------------------------
 
+void Daemon::emit_line(Target* target, const std::string& line) {
+  std::map<int, Client*>::iterator found = clients.find(target->client_fd);
+  if (found == clients.end()) {
+    return;
+  }
+  queue_output(found->second, line);
+}
+
 void Daemon::emit_ping(Target* target, uint64_t sequence, double send_time, int flow) {
   std::map<int, Client*>::iterator found = clients.find(target->client_fd);
   if (found == clients.end()) {
     return;
   }
-  Client* client = found->second;
-  if (client->kind == HTTP_CLIENT) {
-    queue_output(client, make_ping_event(target->address_text, sequence, send_time));
-  } else {
-    queue_output(client, format_ping(target->client_target_id, sequence, send_time, flow));
-  }
+  queue_output(found->second,
+               format_ping(target->client_target_id, sequence, send_time, flow));
 }
 
 void Daemon::emit_reply(Target* target, uint64_t sequence, double receive_time, double rtt,
@@ -478,21 +695,15 @@ void Daemon::emit_reply(Target* target, uint64_t sequence, double receive_time, 
   if (found == clients.end()) {
     return;
   }
-  Client* client = found->second;
-  if (client->kind == HTTP_CLIENT) {
-    queue_output(client, make_reply_event(from, sequence, receive_time, rtt, ttl));
-  } else {
-    queue_output(client,
-                 format_reply(target->client_target_id, sequence, receive_time, rtt, ttl, from,
-                              flow));
-  }
+  queue_output(found->second, format_reply(target->client_target_id, sequence, receive_time,
+                                           rtt, ttl, from, flow));
 }
 
 // ---------------------------------------------------------------------------
 // Step 6: clients.
 // ---------------------------------------------------------------------------
 
-void Daemon::accept_clients(int listen_fd, ClientKind kind) {
+void Daemon::accept_clients() {
   while (true) {
     int fd = accept4(listen_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
     if (fd < 0) {
@@ -503,25 +714,20 @@ void Daemon::accept_clients(int listen_fd, ClientKind kind) {
     }
     Client* client = new Client();
     client->fd = fd;
-    client->kind = kind;
+    client->state = ACTIVE;
     client->uid = (uid_t)-1;
     clients[fd] = client;
 
-    if (kind == HTTP_CLIENT) {
-      client->state = READING_REQUEST;
-    } else {
-      client->state = ACTIVE;
-      // The kernel tells us exactly who is on the other end of a Unix socket.
-      // Not used for anything yet beyond logging; it's what per-user limits
-      // will hang off.
-      struct ucred credentials;
-      socklen_t length = sizeof(credentials);
-      if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &credentials, &length) == 0) {
-        client->uid = credentials.uid;
-      }
-      log_message("client %d: connected (uid %d)", fd, (int)client->uid);
-      queue_output(client, format_hello());
+    // The kernel tells us exactly who is on the other end of a Unix socket.
+    // Not used for anything yet beyond logging; it's what per-user limits
+    // will hang off.
+    struct ucred credentials;
+    socklen_t length = sizeof(credentials);
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &credentials, &length) == 0) {
+      client->uid = credentials.uid;
     }
+    log_message("client %d: connected (uid %d)", fd, (int)client->uid);
+    queue_output(client, format_hello());
   }
 }
 
@@ -530,8 +736,8 @@ void Daemon::read_from_client(Client* client) {
   while (true) {
     ssize_t length = recv(client->fd, buffer, sizeof(buffer), 0);
     if (length == 0) {
-      // The client closed the connection (tab closed, client quit). This is
-      // the moment its targets die.
+      // The client closed the connection (it quit, or crashed). This is the
+      // moment its targets die.
       mark_for_close(client);
       return;
     }
@@ -549,91 +755,18 @@ void Daemon::read_from_client(Client* client) {
       continue;  // draining; ignore anything more
     }
 
-    if (client->kind == HTTP_CLIENT) {
-      if (client->state != READING_REQUEST) {
-        continue;  // nothing more is expected from a browser; ignore it
-      }
-      client->http_input.append(buffer, length);
-      if (client->http_input.size() > MAX_REQUEST_HEAD) {
-        fail_http_client(client, 431, "Request Header Fields Too Large", "request too large\n");
-        return;
-      }
-      size_t head_end = find_end_of_head(client->http_input);
-      if (head_end != 0) {
-        std::string head = client->http_input.substr(0, head_end);
-        client->http_input.clear();
-        handle_http_request(client, head);
-      }
-    } else {
-      client->line_input.append(buffer, length);
-      std::string line;
-      while (client->line_input.next_line(&line)) {
-        handle_line(client, line);
-      }
-      if (client->line_input.overflowed()) {
-        queue_output(client, format_error(-1, "line too long"));
-        client->state = CLOSING;
-        write_to_client(client);
-        return;
-      }
+    client->input.append(buffer, length);
+    std::string line;
+    while (client->input.next_line(&line)) {
+      handle_line(client, line);
     }
-  }
-}
-
-void Daemon::handle_http_request(Client* client, const std::string& head) {
-  HttpRequest request;
-  if (!parse_request(head, &request)) {
-    fail_http_client(client, 400, "Bad Request", "malformed request\n");
-    return;
-  }
-  if (request.method != "GET") {
-    fail_http_client(client, 405, "Method Not Allowed", "GET only\n");
-    return;
-  }
-  if (request.path != "/") {
-    fail_http_client(client, 404, "Not Found", "not found\n");
-    return;
-  }
-
-  std::string name = "8.8.8.8";
-  double interval = 1.0;
-  int packet_size = 64;
-
-  for (std::map<std::string, std::string>::iterator it = request.query.begin();
-       it != request.query.end(); ++it) {
-    const std::string& key = it->first;
-    const std::string& value = it->second;
-    if (key == "address") {
-      name = value;
-    } else if (key == "interval") {
-      char* end = NULL;
-      interval = strtod(value.c_str(), &end);
-      if (end == value.c_str() || *end != '\0') {
-        fail_http_client(client, 400, "Bad Request", "bad interval\n");
-        return;
-      }
-    } else if (key == "packet_size") {
-      char* end = NULL;
-      long size = strtol(value.c_str(), &end, 10);
-      if (end == value.c_str() || *end != '\0') {
-        fail_http_client(client, 400, "Bad Request", "bad packet_size\n");
-        return;
-      }
-      packet_size = size > 65535 ? 65535 : (int)size;
-    } else {
-      fail_http_client(client, 404, "Not Found", "unknown parameter: " + key + "\n");
+    if (client->input.overflowed()) {
+      queue_output(client, format_error(-1, "line too long"));
+      client->state = CLOSING;
+      write_to_client(client);
       return;
     }
   }
-
-  std::string error;
-  if (!request_target(client, 0, name, interval, packet_size, 0, &error)) {
-    fail_http_client(client, error == "resolver unavailable" ? 503 : 400,
-                     error == "resolver unavailable" ? "Service Unavailable" : "Bad Request",
-                     error + "\n");
-    return;
-  }
-  client->state = ACTIVE;
 }
 
 void Daemon::handle_line(Client* client, const std::string& line) {
@@ -643,11 +776,11 @@ void Daemon::handle_line(Client* client, const std::string& line) {
   }
 
   if (message.verb == "add") {
-    // add <id> <host> [interval=S] [size=N] [flows=K]
+    // add <id> <host> [interval=S] [size=N] [flows=K] [probes=R]
     int id;
     if (message.args.size() != 2 || !parse_id(message.args[0], &id)) {
-      queue_output(client,
-                   format_error(-1, "usage: add <id> <host> [interval=S] [size=N] [flows=K]"));
+      queue_output(client, format_error(-1, "usage: add <id> <host> [interval=S] [size=N] "
+                                            "[flows=K] [probes=R]"));
       return;
     }
     double interval = 1.0;
@@ -665,10 +798,46 @@ void Daemon::handle_line(Client* client, const std::string& line) {
       queue_output(client, format_error(id, "bad flows"));
       return;
     }
+    double probes = 0.0;
+    if (message.fields.count("probes") != 0 && !get_field(message, "probes", &probes)) {
+      queue_output(client, format_error(id, "bad probes"));
+      return;
+    }
     std::string error;
-    if (!request_target(client, id, message.args[1], interval, size, flows, &error)) {
+    if (!request_target(client, id, message.args[1], interval, size, flows, probes, &error)) {
       queue_output(client, format_error(id, error));
     }
+    return;
+  }
+
+  if (message.verb == "probe") {
+    // probe <id> rate=R
+    int id;
+    double rate;
+    if (message.args.size() != 1 || !parse_id(message.args[0], &id) ||
+        !get_field(message, "rate", &rate) || !(rate >= 0.0) || isinf(rate)) {
+      queue_output(client, format_error(-1, "usage: probe <id> rate=R"));
+      return;
+    }
+    std::map<int, int>::iterator found = client->targets_by_client_id.find(id);
+    if (found != client->targets_by_client_id.end()) {
+      std::map<int, Target*>::iterator target_it = targets.find(found->second);
+      if (target_it != targets.end()) {
+        if (rate > 0.0 && target_it->second->flows == 0) {
+          queue_output(client, format_error(id, "probes need flows"));
+        } else {
+          set_probe_rate(target_it->second, rate);
+        }
+        return;
+      }
+    }
+    PendingAdd* pending = find_pending(client->fd, id);
+    if (pending != NULL) {
+      // Still resolving: it'll start at this rate.
+      pending->probe_rate = rate;
+      return;
+    }
+    queue_output(client, format_error(id, "no such id"));
     return;
   }
 
@@ -736,15 +905,6 @@ void Daemon::write_to_client(Client* client) {
   if (client->state == CLOSING) {
     mark_for_close(client);
   }
-}
-
-void Daemon::fail_http_client(Client* client, int status, const std::string& reason,
-                              const std::string& body) {
-  // EventSource treats any non-200 response as fatal and does NOT reconnect,
-  // which is what we want for a bad request.
-  client->state = CLOSING;
-  client->output += make_error_response(status, reason, body);
-  write_to_client(client);
 }
 
 // ---------------------------------------------------------------------------

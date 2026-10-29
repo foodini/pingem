@@ -2,6 +2,37 @@
 
 #include <algorithm>
 #include <math.h>
+#include <stdio.h>
+
+std::string describe_flow_mask(FlowMask mask) {
+  // Runs of three or more consecutive flows become "a-b".
+  std::string result;
+  int flow = 0;
+  while (flow < 64) {
+    if ((mask & flow_bit(flow)) == 0) {
+      flow++;
+      continue;
+    }
+    int last = flow;
+    while (last + 1 < 64 && (mask & flow_bit(last + 1)) != 0) {
+      last++;
+    }
+    char text[32];
+    if (last - flow >= 2) {
+      snprintf(text, sizeof(text), "%d-%d", flow, last);
+    } else if (last > flow) {
+      snprintf(text, sizeof(text), "%d,%d", flow, last);
+    } else {
+      snprintf(text, sizeof(text), "%d", flow);
+    }
+    if (!result.empty()) {
+      result += ',';
+    }
+    result += text;
+    flow = last + 1;
+  }
+  return result;
+}
 
 bool ViewWindow::operator==(const ViewWindow& other) const {
   return start == other.start && end == other.end && columns == other.columns &&
@@ -93,39 +124,60 @@ double FlowStats::get_percentile(double fraction) const {
 
 Tabulation::Tabulation()
     : built(false),
-      built_selected_flow(-1),
+      built_selection(0),
       built_version(0),
       built_sample_count(0),
       largest_cell(0),
       largest_selected_cell(0),
       largest_flow_bucket(0) {
   reset_stats(&all_flows, 0);
+  reset_stats(&selection_stats, 0);
 }
 
 void Tabulation::reset_stats(FlowStats* stats, int rows) {
   stats->buckets.assign(rows, 0);
   stats->largest_bucket = 0;
   stats->lost = 0;
+  stats->unreachable = 0;
   stats->sorted_rtts.clear();
   stats->rtt_sum = 0.0;
 }
 
 bool Tabulation::build_if_needed(const TargetHistory& history, const ViewWindow& window,
-                                 int selected_flow) {
-  if (built && built_window == window && built_selected_flow == selected_flow &&
+                                 FlowMask selection) {
+  if (built && built_window == window && built_selection == selection &&
       built_version == history.get_version() &&
       built_sample_count == history.get_samples().size()) {
     return false;
   }
-  build(history, window, selected_flow);
+  build(history, window, selection);
   return true;
 }
 
+// Adds one sample's outcome to a FlowStats. `row` is its RTT bucket (unused
+// unless it was a reply).
+static void add_to_stats(FlowStats* stats, const Sample& sample, int row) {
+  if (sample.state != SAMPLE_REPLIED) {
+    stats->lost++;
+    if (sample.state == SAMPLE_UNREACHABLE) {
+      stats->unreachable++;
+    }
+    return;
+  }
+  int& bucket = stats->buckets[row];
+  bucket++;
+  if (bucket > stats->largest_bucket) {
+    stats->largest_bucket = bucket;
+  }
+  stats->sorted_rtts.push_back(sample.rtt);
+  stats->rtt_sum += sample.rtt;
+}
+
 void Tabulation::build(const TargetHistory& history, const ViewWindow& window,
-                       int selected_flow) {
+                       FlowMask selection) {
   built = true;
   built_window = window;
-  built_selected_flow = selected_flow;
+  built_selection = selection;
   built_version = history.get_version();
   built_sample_count = history.get_samples().size();
 
@@ -136,6 +188,7 @@ void Tabulation::build(const TargetHistory& history, const ViewWindow& window,
   counts.assign((size_t)columns * rows, 0);
   column_total.assign(columns, 0);
   column_lost.assign(columns, 0);
+  column_unreachable.assign(columns, 0);
   largest_cell = 0;
 
   selected_counts.assign((size_t)columns * rows, 0);
@@ -143,6 +196,7 @@ void Tabulation::build(const TargetHistory& history, const ViewWindow& window,
   largest_selected_cell = 0;
 
   reset_stats(&all_flows, rows);
+  reset_stats(&selection_stats, rows);
   per_flow.resize(flow_count);
   for (int flow = 0; flow < flow_count; flow++) {
     reset_stats(&per_flow[flow], rows);
@@ -157,7 +211,8 @@ void Tabulation::build(const TargetHistory& history, const ViewWindow& window,
     if (sample.send_time >= window.end) {
       break;
     }
-    if (sample.state != SAMPLE_REPLIED && sample.state != SAMPLE_LOST) {
+    if (sample.state != SAMPLE_REPLIED && sample.state != SAMPLE_LOST &&
+        sample.state != SAMPLE_UNREACHABLE) {
       continue;   // pending or abandoned: not counted either way
     }
 
@@ -171,16 +226,26 @@ void Tabulation::build(const TargetHistory& history, const ViewWindow& window,
     if (flow >= 0 && flow < flow_count) {
       flow_stats = &per_flow[flow];
     }
-    bool is_selected = selected_flow >= 0 && flow == selected_flow;
+    bool is_selected = flow >= 0 && (selection & flow_bit(flow)) != 0;
 
-    if (sample.state == SAMPLE_LOST) {
+    if (sample.state != SAMPLE_REPLIED) {
+      // Lost, or refused: either way it didn't get there.
+      bool refused = sample.state == SAMPLE_UNREACHABLE;
       column_lost[column]++;
       all_flows.lost++;
+      if (refused) {
+        column_unreachable[column]++;
+        all_flows.unreachable++;
+      }
       if (flow_stats != NULL) {
         flow_stats->lost++;
+        if (refused) {
+          flow_stats->unreachable++;
+        }
       }
       if (is_selected) {
         selected_column_lost[column]++;
+        add_to_stats(&selection_stats, sample, 0);
       }
       continue;
     }
@@ -205,6 +270,7 @@ void Tabulation::build(const TargetHistory& history, const ViewWindow& window,
       if (selected_cell > largest_selected_cell) {
         largest_selected_cell = selected_cell;
       }
+      add_to_stats(&selection_stats, sample, row);
     }
 
     int& bucket = all_flows.buckets[row];
@@ -232,6 +298,7 @@ void Tabulation::build(const TargetHistory& history, const ViewWindow& window,
   // A numeric sort. (The JS version's samples.sort() compared the numbers as
   // strings.)
   std::sort(all_flows.sorted_rtts.begin(), all_flows.sorted_rtts.end());
+  std::sort(selection_stats.sorted_rtts.begin(), selection_stats.sorted_rtts.end());
   for (int flow = 0; flow < flow_count; flow++) {
     std::sort(per_flow[flow].sorted_rtts.begin(), per_flow[flow].sorted_rtts.end());
   }
@@ -249,12 +316,20 @@ int Tabulation::get_column_lost(int column) const {
   return column_lost[column];
 }
 
+int Tabulation::get_column_unreachable(int column) const {
+  return column_unreachable[column];
+}
+
 int Tabulation::get_largest_cell() const {
   return largest_cell;
 }
 
-int Tabulation::get_selected_flow() const {
-  return built_selected_flow;
+FlowMask Tabulation::get_selection() const {
+  return built_selection;
+}
+
+const FlowStats& Tabulation::get_selection_stats() const {
+  return selection_stats;
 }
 
 int Tabulation::get_selected_count(int column, int row) const {

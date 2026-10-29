@@ -21,6 +21,11 @@
 //   | 'x' padding ...           |   up to packet_size total
 //   +---------------------------+
 //
+// Probes for route discovery are the same packets sent with a small TTL. A
+// router that drops one for running out of TTL sends back ICMP Time
+// Exceeded, quoting our IP header and (at least) the 8 ICMP header bytes
+// above - which is all we need to know which probe it was.
+//
 // The identifier and sequence number are the ONLY fields we rely on to match a
 // reply (or, later, a Time Exceeded) to the packet that caused it. Those 8
 // header bytes are the part of our packet that every router is required to
@@ -41,11 +46,24 @@ const int MIN_PACKET_SIZE = 18;
 // rarely what anyone wants to measure.
 const int MAX_PACKET_SIZE = 8192;
 
-struct EchoReply {
-  struct in_addr source;   // who answered
-  uint16_t identifier;
-  uint16_t sequence;
-  int ttl;                 // TTL of the reply as it arrived
+// Something that arrived on the raw socket that concerns one of OUR echo
+// requests: either the echo reply itself, or an ICMP error a router sent back
+// about it (Time Exceeded for a TTL-limited probe, Destination Unreachable,
+// ...). Either way, identifier and sequence identify which of our packets it
+// was about.
+enum IcmpMessageKind {
+  ICMP_ECHO_REPLY,
+  ICMP_ERROR
+};
+
+struct IcmpMessage {
+  IcmpMessageKind kind;
+  struct in_addr source;   // who sent this message (the target, or a router)
+  uint16_t identifier;     // of OUR packet
+  uint16_t sequence;       // of OUR packet
+  int ttl;                 // TTL of this message as it arrived
+  int error_type;          // ICMP_ERROR only: 3 = unreachable, 11 = time exceeded, ...
+  int error_code;          // ICMP_ERROR only
   double receive_monotonic;
   double receive_realtime;
 };
@@ -68,18 +86,23 @@ public:
   // what makes a "flow": per-flow load balancers hash on the checksum, so
   // every packet with the same checksum takes the same path. Avoid 0x0000
   // and 0xffff, which are the same number in ones-complement arithmetic.
+  //
+  // ttl: the IP time-to-live to send with; 0 means the system default.
   int send_echo(const struct in_addr& destination, uint16_t identifier,
-                uint16_t sequence, int packet_size, int fixed_checksum);
+                uint16_t sequence, int packet_size, int fixed_checksum, int ttl);
 
-  // Non-blocking. Returns true and fills *reply if an echo reply with our
-  // magic was waiting; returns false when there is nothing (more) to read.
-  // Packets that are not ours are silently consumed, so callers should keep
-  // calling until it returns false.
-  bool receive_echo_reply(EchoReply* reply);
+  // Non-blocking. Returns true and fills *message if an echo reply, or an
+  // ICMP error quoting one of our echo requests, was waiting; returns false
+  // when there was nothing (more) of interest. Packets that are not ours are
+  // silently consumed, so callers should keep calling until is_drained().
+  // Whether a message is really ours is finally decided by the caller,
+  // which looks up (identifier, sequence) in its table of outstanding
+  // packets.
+  bool receive_message(IcmpMessage* message);
 
-  // True if the last receive_echo_reply() returned false because the socket
-  // is drained (EAGAIN), false if it consumed an uninteresting packet and
-  // there may be more. Lets the caller loop "until drained".
+  // True if the last receive_message() returned false because the socket is
+  // drained (EAGAIN), false if it consumed an uninteresting packet and there
+  // may be more. Lets the caller loop "until drained".
   bool is_drained() const;
 
 private:
@@ -87,6 +110,7 @@ private:
 
   int fd;
   bool drained;
+  int current_ttl;         // what IP_TTL is set to now (0 = never set)
   unsigned char send_buffer[MAX_PACKET_SIZE];
   unsigned char receive_buffer[MAX_PACKET_SIZE + 1024];
 };

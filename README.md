@@ -11,24 +11,28 @@ and start it as root:
     sudo ./user_icmp
 
 It needs root for exactly one thing: opening a raw ICMP socket. It opens that
-socket, opens its listening socket (127.0.0.1:8000 only), and then permanently
-drops to `nobody` before it reads a single byte from anyone. Everything else -
-the HTTP parsing, DNS, all client input - runs unprivileged. (Instead of sudo,
-you can `sudo setcap cap_net_raw+ep user_icmp` and run it as yourself.)
+socket, opens its listening socket (`@user_icmp`, a Unix socket with no file
+on disk), and then permanently drops to `nobody` before it reads a single byte
+from anyone. Everything else - the protocol parsing, DNS, all client input -
+runs unprivileged. (Instead of sudo,
+you can `sudo setcap cap_net_raw+ep user_icmp` and run it as yourself. It then
+clears that capability as soon as the raw socket is open, and in both cases
+it checks that it can no longer open another raw socket before going on. Note
+that every rebuild loses the capability, so rerun setcap after `make`; and
+file capabilities are ignored on filesystems mounted `nosuid`.)
 
 Options:
-* `--port N` - TCP port on 127.0.0.1 (default 8000)
 * `--user NAME` - who to become after startup (default nobody)
 * `--min-interval S` - fastest any client may ping a target (default 0.1 s)
 * `--reply-expiry S` - forget unanswered packets after this long (default 60 s)
 
-The old Python agent, user_icmp2.py, still works and speaks the same protocol,
-but it runs entirely as root and is on its way out.
+(pingem started out as a browser page, pingem.html, fed by a Python agent,
+user_icmp2.py, that ran entirely as root. Both have been retired in favor of
+the C++ daemon and the graphical client below.)
 
 # The graphical client
 `clients/pingem` is a native OpenGL client (SDL2 + Dear ImGui) that talks to
-user_icmp over a Unix socket. It's replacing pingem.html, and it runs from the
-command line:
+user_icmp over a Unix socket. It runs from the command line:
 
     sudo apt install libsdl2-dev               # build dependency
     cd clients
@@ -40,8 +44,24 @@ left-click and drag scrubs through time (the epoch you grab stays under the
 mouse); End (or F) goes back to following "now"; the View button (or V)
 switches the summary column between "combined" and "by flow"; the Scale
 button (or L) switches the RTT axis between linear and logarithmic (see
-below); Q or Escape quits. If user_icmp isn't running, or restarts, the client keeps retrying and
-picks up where it left off; the outage shows as a gap.
+below). At the left of each row's status line, X stops pinging that host and
+removes the row, and the route button (a little forking path) opens that
+host's route graph (see "Routes" below). R opens the route map with every
+host on it. Escape closes the route view, or quits if it isn't open; Q
+quits. If user_icmp isn't running, or restarts, the
+client keeps retrying and picks up where it left off; the outage shows as a
+gap.
+
+Building the client also fetches Mozilla's Public Suffix List into
+`~/.cache/pingem/` (once; `make update-psl` refreshes it). The route graph
+uses it to turn router names into the domain that owns them. pingem never
+downloads anything itself, and works without the list - it just guesses.
+
+**Refused pings.** Sometimes a ping isn't lost but refused: a router answers
+it with an ICMP error ("host unreachable", "administratively prohibited"...)
+instead of passing it on. Those count as loss, but the loss bar for them is
+dotted rather than solid, the statistics show how much of the loss was
+refused, and the status line says who refused it and why.
 
 ## Flows, and how to read the "by flow" view
 
@@ -183,32 +203,149 @@ How the log scale is set up:
   RTTs, so a clump at 50 ms looks narrower than one at 5 ms with the same
   spread in milliseconds.
 
+## Routes: where do the flows go?
+
+Alongside its pings, user_icmp sends each host a slow trickle of *route
+probes* - traceroute, done carefully. A probe is a ping with a small TTL
+(time-to-live: the number of routers it may cross). The router where the TTL
+runs out drops it and sends back "Time Exceeded", which tells us who that
+router is. Probes use the same fixed checksums as the flows, so each flow's
+probes follow exactly the path its pings take. Probes go out at one per ping
+interval normally, four while that host's route graph is open, always spaced
+evenly between the pings - never in bursts.
+
+Click a row's route button and that row moves to the top, and the rest of
+the window shows the paths to that host:
+
+![Route graph](docs/images/route_graph.png)
+
+*Your machine ("here") is bottom left, the target top right, and every
+router in between, labeled with its address and the domain that owns it.
+Lines are links; the thicker the line, the more flows use it. Here the
+paths split twice: after 127.0.1.2 (the ISP's load balancer sends some flows
+via .3 and the rest via .4), and again after the fourth hop. The "*" nodes
+are routers that never answered - many don't send Time Exceeded at all, or
+only a few a second. That's normal, not a fault.*
+
+The graph always shows the routes during the time window the heatmap is
+showing, so if you drag or zoom the heatmap back to last night, the graph
+shows last night's routes. Hovering over a router shows its full name, round
+trip times, how many probes it answered, and which flows go through it;
+hovering over a link shows its flows.
+
+Click a link or a router to select the flows that use it. They light up in
+the graph *and* in the heatmap above, and the statistics switch to just
+those flows:
+
+![Selected flows](docs/images/route_selected.png)
+
+*The link from .2 to .3 is selected: flows 1 and 4 use it. In the heatmap
+(and in the "by flow" histograms, right) those two flows are the fast band at
+about 7 ms; everything else - the flows going via .4 - is the slower band.
+Now we know which path adds the delay.*
+
+In the "by flow" view, hovering over a flow's histogram lights up its path,
+and clicking it selects it. Click empty space in the graph to clear the
+selection.
+
+A router that *refuses* probes (Destination Unreachable) gets a red ring:
+
+![Refused probes](docs/images/route_refused.png)
+
+### All the routes on one map
+
+Press R for every host's routes on one map:
+
+![All routes](docs/images/all_routes.png)
+
+*Six hosts. Each has a color, and ends at a box in that color; "here" is at
+the bottom. A router on several hosts' paths appears once, and the link into
+it is drawn as parallel stripes - one per host using it, each as thick as
+that host's share of the traffic over it - like subway lines sharing a
+track. Here 127.0.0.15 leaves the others right after the home router;
+127.0.0.12 leaves after the ISP (and flips between two routes every 45
+seconds - see the ticks in its lane); 127.0.0.13 shares the load-balanced
+hop and then heads off on its own; 127.0.0.10 and .11 stay together until
+the end; and 127.0.0.14 - like most big search engines - is behind three
+hops that never answer ("*x3") and then a long chain of routers, which is
+stacked into a column.*
+
+The heatmaps make way for a time strip at the top, with a lane per host.
+Each lane is shaded where there's data, has a red bar where pings were lost,
+and a tick wherever one of that host's paths changed - usually the moments
+worth looking at. (Above, 127.0.0.12's route flips every 45 seconds.) The
+strip works like a heatmap: scroll to zoom, drag to move back in time, End
+to follow "now" again, and the map shows the routes as they were. Each
+lane's name is a checkbox that adds the host to the map or takes it off; with
+only one left, you're back to that host's heatmap and graph. A row's route
+button opens the same view with just that host, with the checkboxes under the
+title to add others.
+
+Hovering over a router lights up the lanes of the hosts that use it, and the
+tooltip gives its share of each one's traffic:
+
+![Hovering a shared router](docs/images/all_routes_hover.png)
+
+How the map is drawn:
+* **Silent hops.** A run of hops that never answer is one node: "*", with
+  "x5" beside it for five in a row. Until each hop in it has gone unanswered
+  three times it's "?" instead - it might be a router that never answers,
+  or a few probes that just got lost.
+* **Routers that answer only some probes.** Many routers (home routers
+  especially) only answer a few probes a second. When a flow hears nothing
+  at a hop where every other flow coming from the same place heard from one
+  router, it's drawn through that router too - not as a separate path - and
+  that router's "answered x% of probes" shows the silence.
+* **Layout.** It starts as a tree - "here" at the bottom, branches side by
+  side where paths split, in whichever order of the hosts gives the fewest
+  crossing links - and then physics takes over, with everything free to
+  move: links pull like springs, the hosts and "here" push each other far
+  apart (which spreads the map out), everything else keeps its neighbours at
+  a distance, nodes and labels may not overlap, and links - as wide as their
+  bundle of stripes - push away the nodes and labels they don't belong to.
+  Height on the map isn't hop count; things go wherever the picture is
+  clearest. A chain of three or more routers with no branches stays a rigid
+  column, labels one above the other. Each label then takes whichever corner
+  of its node is clearest.
+* **Bigger than the window?** Drag the map to move it, scroll over it to
+  zoom; "Fit" shrinks it to fit, "100%" puts it back to full size.
+* As before, nothing moves on its own once drawn: when new routers turn up,
+  the "New routes found" button redoes the layout.
+
+**Traffic share.** Pings rotate evenly through the flows, so a router's
+share of a host's traffic is the average, over the flows, of the fraction of
+each flow's probes (at that hop, during the time shown) that it answered.
+A flow whose route changed halfway through counts as half a flow. "Right
+now" counts the flows whose most recent probe went through it - if the two
+disagree, the route changed during the time shown. With 8 flows the
+estimate moves in steps of 1/8, and only 8 of the router's hash buckets are
+ever sampled, so treat it as rough; more flows (`--flows 16`) sharpen it.
+
+A few more things worth knowing:
+* A router's own round trip time is often slower and jumpier than the
+  traffic passing through it: answering a probe is a chore for its CPU, done
+  when it gets around to it. See "Why per-hop RTTs lie" below. The RTTs that
+  count are the target's.
+* The layout stays put once drawn, so nothing jumps around while you read it.
+  When new routers turn up, a "New routes found" button offers to redo it.
+* If a target is anycast (many servers sharing one address), whichever copy
+  answers is shown as the target.
+
 **About the example images.** They're real pingem screenshots, but of
 simulated networks: `docs/tools/fake_responder.py` answers pings to
 127.0.0.2-5 with made-up delays (two routes chosen by checksum, delays chosen
-per packet, a four-hop path with a jittery cable link, and so on), so each
-situation can be shown on demand. Its header
-says how to run it to regenerate the images. The odd stray reply far above
-the bands is the simulator's own timing noise.
+per packet, a four-hop path with a jittery cable link, and so on), and plays
+a whole small network of fake routers for 127.0.0.10-15, so each situation
+can be shown on demand. Its header says how to run it to regenerate the
+images. (The router names in the route images came from temporary
+/etc/hosts entries.) The odd stray reply far above the bands is the
+simulator's own timing noise.
 
 The Unix socket speaks a plain-text line protocol (documented in
 shared/protocol.h), so you can also drive user_icmp by hand:
 
     socat - ABSTRACT-CONNECT:user_icmp
     add 1 8.8.8.8 interval=1
-
-# The browser page (being retired)
-From there, just open the .html in a browser on the same machine as user_icmp2.
-The url accepts some parameters;
-* endpoints is a comma-separated list of ping targets.
-* interval is the time delay between icmp packets to each endpoint. The default
-  is 1 second, and that's a good default - see "Be gentle" below.
-* packet_size is pretty easy to figure out. (The minimum is currently around 32)
-
-So:
-  file:///home/me/pingem/pingem.html?endpoints=192.168.1.1,8.8.8.8&interval=0.5
-...will give you a track of network behavior to your local router... or
-whatever.
 
 # Purpose
 I frequently leave ping running in a terminal so I have something to visually
@@ -298,10 +435,15 @@ A few things the C++ agent does differently:
   back in an ICMP error, so nothing depends on a payload surviving the trip.
 * Every packet is scheduled individually and never sent in bursts. If the agent
   falls behind it skips ahead rather than catching up.
-* A target dies the moment its browser connection closes. (The Python agent
+* A target dies the moment its client's connection closes. (The Python agent
   kept pinging orphaned targets forever.)
 * The agent is the only clock: it timestamps pings when sent and replies when
-  received, and the page no longer overwrites those timestamps.
+  received.
+* ICMP errors about our pings (Destination Unreachable, Time Exceeded) are
+  matched to the ping they quote and reported to the client at once, instead
+  of leaving the ping to time out as "lost".
+* Route probes have their own ICMP identifier, so they can never be mistaken
+  for pings or counted as loss.
 
 # Be gentle
 Everything on the path between you and a target has queues. Back-to-back
@@ -310,12 +452,13 @@ treat ICMP aimed at their own CPUs as low priority and rate-limit it. A ping a
 second per target tells you nearly everything a ping every 100 ms does.
 
 
-# Route characterization and hop latency (design notes - not built yet)
+# Route characterization and hop latency (design notes)
 
-The plan: alongside its regular pings, user_icmp will send occasional
-TTL-limited probes to discover the route(s) to each target, the same way
-traceroute does. Two ideas from Paris traceroute make this work in the presence
-of load balancing:
+Route discovery is built (see "Routes" above); the per-hop latency analysis
+later in this section is not, yet. Alongside its regular pings, user_icmp
+sends occasional TTL-limited probes to discover the route(s) to each target,
+the same way traceroute does. Two ideas from Paris traceroute make this work
+in the presence of load balancing:
 
 * **Flows.** Routers that spread traffic over parallel links mostly choose the
   link by hashing header fields - for ICMP, that includes the ICMP checksum.
@@ -324,9 +467,9 @@ of load balancing:
   "flow" takes the same forward path. Use several different fixed checksums and
   you get several flows, which may take different paths.
 * **Probes share their flow's checksum,** so a TTL-limited probe follows the
-  same path as the ordinary pings in its flow. That's what lets the main graph
-  be colored by route: every reply belongs to a known flow, and every flow maps
-  to a discovered path.
+  same path as the ordinary pings in its flow. That's what lets a route
+  selected in the route graph light up in the heatmap: every reply belongs to
+  a known flow, and every flow maps to a discovered path.
 
 The rest of this section is about the hard part: deciding what the per-hop
 round trip times are actually telling you.

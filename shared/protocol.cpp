@@ -160,15 +160,25 @@ std::string format_hello() {
   return std::string(line);
 }
 
-std::string format_add(int id, const std::string& host, double interval, int size, int flows) {
+std::string format_add(int id, const std::string& host, double interval, int size, int flows,
+                       double probe_rate) {
   char line[MAX_LINE_LENGTH];
+  snprintf(line, sizeof(line), "add %d %s interval=%g size=%d", id, host.c_str(), interval, size);
+  std::string result(line);
   if (flows > 0) {
-    snprintf(line, sizeof(line), "add %d %s interval=%g size=%d flows=%d\n", id, host.c_str(),
-             interval, size, flows);
-  } else {
-    snprintf(line, sizeof(line), "add %d %s interval=%g size=%d\n", id, host.c_str(), interval,
-             size);
+    snprintf(line, sizeof(line), " flows=%d", flows);
+    result += line;
   }
+  if (probe_rate > 0.0) {
+    snprintf(line, sizeof(line), " probes=%g", probe_rate);
+    result += line;
+  }
+  return result + "\n";
+}
+
+std::string format_probe(int id, double rate) {
+  char line[64];
+  snprintf(line, sizeof(line), "probe %d rate=%g\n", id, rate);
   return std::string(line);
 }
 
@@ -229,4 +239,33 @@ std::string format_reply(int id, uint64_t seq, double receive_time, double rtt, 
   snprintf(line, sizeof(line), "reply %d seq=%" PRIu64 " t=%.6f rtt=%.9f ttl=%d from=%s", id, seq,
            receive_time, rtt, ttl, from.c_str());
   return std::string(line) + flow_field(flow) + "\n";
+}
+
+std::string format_unreachable(int id, uint64_t seq, double receive_time,
+                               const std::string& from, int type, int code, int flow) {
+  char line[256];
+  snprintf(line, sizeof(line), "unreachable %d seq=%" PRIu64 " t=%.6f from=%s type=%d code=%d",
+           id, seq, receive_time, from.c_str(), type, code);
+  return std::string(line) + flow_field(flow) + "\n";
+}
+
+std::string format_hop(int id, int flow, int ttl, double send_time, double rtt,
+                       const std::string& from, bool reached, int code) {
+  char line[256];
+  if (rtt < 0.0) {
+    snprintf(line, sizeof(line), "hop %d flow=%d ttl=%d t=%.6f from=*\n", id, flow, ttl,
+             send_time);
+    return std::string(line);
+  }
+  snprintf(line, sizeof(line), "hop %d flow=%d ttl=%d t=%.6f rtt=%.9f from=%s", id, flow, ttl,
+           send_time, rtt, from.c_str());
+  std::string result(line);
+  if (reached) {
+    result += " reached=1";
+  }
+  if (code >= 0) {
+    snprintf(line, sizeof(line), " code=%d", code);
+    result += line;
+  }
+  return result + "\n";
 }

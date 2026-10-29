@@ -1,17 +1,25 @@
 // main.cpp - user_icmp: sends and receives ICMP echo on behalf of unprivileged
-// local clients (pingem.html, and eventually "boink").
+// local clients (the pingem GL client, and eventually "boink").
 //
 // Startup order matters for security:
 //
 //   1. Open the raw ICMP socket.          (needs root / CAP_NET_RAW)
-//   2. Open the listening TCP socket.     (port > 1023, needs nothing)
-//   3. Drop privileges for good.          setgroups / setgid / setuid
-//   4. Run the loop.                      everything else - the HTTP parser,
-//                                         DNS, all client input - runs
-//                                         unprivileged.
+//   2. Open the listening socket.         (@user_icmp; needs nothing)
+//   3. Drop privileges for good.          setgroups / setgid / setuid, then
+//                                         clear every capability
+//   4. Run the loop.                      everything else - the protocol
+//                                         parser, DNS, all client input -
+//                                         runs unprivileged.
 //
 // The raw socket survives step 3 because privilege is checked when a socket is
 // created, not each time it's used.
+//
+// Two ways to start it, and step 3 covers both:
+//   sudo ./user_icmp          root: switch to --user (default nobody), which
+//                             also clears all capabilities.
+//   setcap cap_net_raw+ep     you: no user to switch, but the process holds
+//                             CAP_NET_RAW, so it's cleared explicitly.
+// Either way, step 3 ends by proving it can't open another raw socket.
 
 #include "common.h"
 #include "daemon.h"
@@ -29,7 +37,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <linux/capability.h>
 #include <sys/prctl.h>
+#include <sys/syscall.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <time.h>
@@ -38,36 +48,11 @@
 static void usage(const char* program) {
   fprintf(stderr,
           "usage: %s [options]\n"
-          "  --port N            TCP port on 127.0.0.1 (default 8000)\n"
           "  --user NAME         user to run as after startup (default nobody)\n"
           "  --min-interval S    smallest per-target interval allowed, seconds (default 0.1)\n"
           "  --reply-expiry S    forget unanswered packets after S seconds (default 60)\n"
           "  --help\n",
           program);
-}
-
-static int open_listen_socket(int port) {
-  int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-  if (fd < 0) {
-    return -1;
-  }
-  int one = 1;
-  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-
-  // Loopback only. user_icmp2.py listened on every interface and rejected
-  // non-local clients after the fact; not listening at all is better.
-  struct sockaddr_in address;
-  memset(&address, 0, sizeof(address));
-  address.sin_family = AF_INET;
-  address.sin_port = htons(port);
-  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  if (bind(fd, (struct sockaddr*)&address, sizeof(address)) < 0 || listen(fd, 16) < 0) {
-    int saved = errno;
-    close(fd);
-    errno = saved;
-    return -1;
-  }
-  return fd;
 }
 
 // The Unix domain socket for line-protocol clients, in the Linux "abstract
@@ -103,15 +88,58 @@ static int open_unix_listen_socket(const char* name) {
   return fd;
 }
 
+// Empties all three capability sets (effective, permitted, inheritable) -
+// and with permitted empty, the kernel empties the ambient set too. Done with
+// the raw capset() system call so we don't need libcap.
+static bool clear_capabilities() {
+  struct __user_cap_header_struct header;
+  struct __user_cap_data_struct data[2];   // version 3 uses two
+  memset(&header, 0, sizeof(header));
+  memset(data, 0, sizeof(data));
+  header.version = _LINUX_CAPABILITY_VERSION_3;
+  header.pid = 0;   // this process
+  return syscall(SYS_capset, &header, data) == 0;
+}
+
+// The proof that step 3 worked: we must no longer be able to do the one
+// privileged thing we ever did.
+static bool can_open_raw_socket() {
+  int fd = socket(AF_INET, SOCK_RAW | SOCK_CLOEXEC, IPPROTO_ICMP);
+  if (fd < 0) {
+    return false;
+  }
+  close(fd);
+  return true;
+}
+
+static bool switch_user(const char* user_name);
+
 // Returns false if privileges could not be dropped COMPLETELY. In that case
 // we refuse to run at all.
 static bool drop_privileges(const char* user_name) {
-  if (geteuid() != 0) {
-    // Not root - presumably started with just CAP_NET_RAW via setcap. Nothing
-    // to drop.
-    return true;
+  if (geteuid() == 0 && !switch_user(user_name)) {
+    return false;
   }
+  // Root or not: shed every capability. (Started via setcap, this is where
+  // CAP_NET_RAW goes. After switching away from root they're already gone,
+  // and this changes nothing.)
+  if (!clear_capabilities()) {
+    perror("user_icmp: capset");
+    return false;
+  }
+  // And make sure nothing we might ever exec could regain privilege.
+  prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
 
+  if (can_open_raw_socket()) {
+    fprintf(stderr, "user_icmp: still able to open raw sockets after dropping privileges; "
+                    "exiting\n");
+    return false;
+  }
+  return true;
+}
+
+// Root only: become `user_name` for good.
+static bool switch_user(const char* user_name) {
   struct passwd* user = getpwnam(user_name);
   if (user == NULL) {
     fprintf(stderr, "user_icmp: no such user '%s'\n", user_name);
@@ -141,22 +169,18 @@ static bool drop_privileges(const char* user_name) {
     fprintf(stderr, "user_icmp: privilege drop did not stick; exiting\n");
     return false;
   }
-
-  // And make sure nothing we might ever exec could regain privilege.
-  prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
   return true;
 }
 
 int main(int argc, char* argv[]) {
   DaemonConfig config;
-  config.port = 8000;
   config.min_interval = 0.1;
   config.reply_expiry = 60.0;
+  config.probe_timeout = 3.0;
   config.max_client_backlog = 4 * 1024 * 1024;
   const char* user_name = "nobody";
 
   static struct option long_options[] = {
-      {"port", required_argument, NULL, 'p'},
       {"user", required_argument, NULL, 'u'},
       {"min-interval", required_argument, NULL, 'm'},
       {"reply-expiry", required_argument, NULL, 'e'},
@@ -169,9 +193,6 @@ int main(int argc, char* argv[]) {
       break;
     }
     switch (option) {
-      case 'p':
-        config.port = atoi(optarg);
-        break;
       case 'u':
         user_name = optarg;
         break;
@@ -186,8 +207,7 @@ int main(int argc, char* argv[]) {
         return option == 'h' ? 0 : 2;
     }
   }
-  if (config.port <= 0 || config.port > 65535 || config.min_interval <= 0.0 ||
-      config.reply_expiry <= 0.0) {
+  if (config.min_interval <= 0.0 || config.reply_expiry <= 0.0) {
     usage(argv[0]);
     return 2;
   }
@@ -209,16 +229,10 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  // ---- Step 2: open the listening sockets (127.0.0.1 TCP and @user_icmp). ----
-  // ---- Still privileged, but they don't need to be.                      ----
-  int listen_fd = open_listen_socket(config.port);
+  // ---- Step 2: open the listening socket @user_icmp. Still privileged, ----
+  // ---- but it doesn't need to be.                                       ----
+  int listen_fd = open_unix_listen_socket(USER_ICMP_SOCKET_NAME);
   if (listen_fd < 0) {
-    fprintf(stderr, "user_icmp: cannot listen on 127.0.0.1:%d: %s\n", config.port,
-            strerror(errno));
-    return 1;
-  }
-  int unix_listen_fd = open_unix_listen_socket(USER_ICMP_SOCKET_NAME);
-  if (unix_listen_fd < 0) {
     fprintf(stderr, "user_icmp: cannot listen on @%s: %s\n", USER_ICMP_SOCKET_NAME,
             strerror(errno));
     fprintf(stderr, "  (is another user_icmp already running?)\n");
@@ -233,7 +247,7 @@ int main(int argc, char* argv[]) {
   log_message("running as uid %d gid %d", (int)getuid(), (int)getgid());
 
   // ---- Step 4: run the loop (see daemon.h). Never returns. ----
-  Daemon daemon(config, &icmp_socket, listen_fd, unix_listen_fd);
+  Daemon daemon(config, &icmp_socket, listen_fd);
   daemon.run();
   return 0;
 }

@@ -23,6 +23,7 @@ struct TargetSpec {
   double interval;
   int packet_size;
   int flows;            // 0 = no flows
+  double probe_rate;    // route probes per ping interval (0 = none; needs flows)
 };
 
 enum LinkEventType {
@@ -31,7 +32,10 @@ enum LinkEventType {
   LINK_ADDED,         // id, address
   LINK_ERROR,         // id (-1 if not about a target), text
   LINK_PING,          // id, seq, time, flow
-  LINK_REPLY          // id, seq, time, rtt, ttl, address (= who replied), flow
+  LINK_REPLY,         // id, seq, time, rtt, ttl, address (= who replied), flow
+  LINK_UNREACHABLE,   // id, seq, time, address (= who refused), error_type, error_code, flow
+  LINK_HOP            // id, flow, ttl (the probe's), time (sent), rtt (< 0: no answer),
+                      // address ("*" if none), reached, error_code (-1 unless type 3)
 };
 
 struct LinkEvent {
@@ -42,6 +46,9 @@ struct LinkEvent {
   double rtt;
   int ttl;
   int flow;           // -1 if the target doesn't use flows
+  int error_type;
+  int error_code;
+  bool reached;
   std::string address;
   std::string text;
 };
@@ -56,6 +63,12 @@ public:
   void poll(double now, std::vector<LinkEvent>* events);
 
   bool is_connected() const;
+
+  // Changes a target's probe rate, now if connected, and remembers it for
+  // reconnects.
+  void set_probe_rate(int id, double rate);
+  // Stops pinging a target for good.
+  void remove_target(int id);
 
 private:
   bool try_connect();

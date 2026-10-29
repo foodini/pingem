@@ -5,7 +5,9 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <string>
 #include <time.h>
+#include <utility>
 
 // Colors, matching the JS version.
 static const ImU32 COLOR_BORDER = IM_COL32(128, 128, 128, 255);
@@ -14,13 +16,14 @@ static const ImU32 COLOR_GRID = IM_COL32(255, 96, 96, 80);
 // Darker than the pure red that marks the fullest cell, so the two stay
 // distinct.
 static const ImU32 COLOR_LOSS = IM_COL32(150, 0, 0, 255);
-// With a flow selected, everything that isn't that flow is drawn at this
+// With flows selected, everything that isn't one of them is drawn at this
 // fraction of its normal brightness.
 static const double DIM = 0.3;
 static const ImU32 COLOR_LOSS_DIM = IM_COL32(45, 0, 0, 255);
 static const ImU32 COLOR_SELECTED_STRIP = IM_COL32(45, 45, 45, 255);
 static const ImU32 COLOR_CROSSHAIR = IM_COL32(255, 0, 0, 255);
 static const ImU32 COLOR_STATS = IM_COL32(255, 255, 96, 255);
+static const ImU32 COLOR_STATS_LABEL = IM_COL32(170, 170, 120, 255);
 static const ImU32 COLOR_TEXT = IM_COL32(255, 255, 255, 255);
 
 static const int VERTICAL_LABEL_DIVISIONS = 5;
@@ -58,7 +61,7 @@ void draw_outlined_text(ImDrawList* draw_list, ImVec2 position, ImU32 color, con
 
 // Milliseconds with enough decimals to be useful at any scale: on a LAN the
 // whole graph can be under a millisecond, where "%.1f" shows 0.1 everywhere.
-static void format_ms(double seconds, const char* suffix, char* out, size_t out_size) {
+void format_ms(double seconds, const char* suffix, char* out, size_t out_size) {
   double ms = seconds * 1000.0;
   const char* format = "%.1fms%s";
   if (ms < 1.0) {
@@ -94,14 +97,46 @@ static double local_utc_offset(double t) {
   return (double)local.tm_gmtoff;
 }
 
+// Vertical time grid. The lines sit on round local clock times (every 30
+// seconds, every 5 minutes, every hour...), labeled with that time. Since
+// they're pinned to times, they belong to the data: when the graph steps
+// left by a column, the lines step with it, and their labels never change.
+void draw_time_grid(ImDrawList* draw_list, ImVec2 box_min, ImVec2 box_max, float inset_x,
+                    float inset_width, const ViewWindow& window, double now) {
+  char text[64];
+  double span = window.end - window.start;
+  int spacing_index = 0;
+  while (spacing_index < TIME_GRID_SPACING_COUNT - 1 &&
+         span / 6.0 >= TIME_GRID_SPACINGS[spacing_index]) {
+    spacing_index++;
+  }
+  double spacing = TIME_GRID_SPACINGS[spacing_index];
+  // Never draw a line in the future: while following, the right edge is
+  // rounded up past "now" to finish the current column.
+  double right = window.end < now ? window.end : now;
+  double offset = local_utc_offset(right);
+  double newest_line = floor((right + offset) / spacing) * spacing - offset;
+  for (double line_time = newest_line; line_time > window.start; line_time -= spacing) {
+    double fraction = (line_time - window.start) / span;
+    float x = floorf(inset_x + (float)fraction * inset_width);
+    draw_list->AddLine(ImVec2(x + 0.5f, box_min.y), ImVec2(x + 0.5f, box_max.y), COLOR_GRID);
+    format_clock_time(line_time, spacing, text, sizeof(text));
+    // Labels sit to the left of their line; skip one that would hang off the
+    // left edge rather than draw it cut in half.
+    if (x - 2 - ImGui::CalcTextSize(text).x >= box_min.x) {
+      draw_outlined_text(draw_list, ImVec2(x - 2, box_max.y - 1), COLOR_LABEL, text, true, true);
+    }
+  }
+}
+
 RowView::RowView()
     : tabulation_changed(true),
       texture(0),
       texture_columns(0),
       texture_rows(0),
       colored_with_largest(-1),
-      colored_with_highlight(-1),
-      selected_flow(-1) {
+      colored_with_highlight(0),
+      selection(0) {
 }
 
 RowView::~RowView() {
@@ -115,12 +150,13 @@ const Tabulation& RowView::get_tabulation() const {
   return tabulation;
 }
 
-void RowView::tabulate(const TargetHistory& history, const ViewWindow& window, bool by_flow) {
-  // A selection only means something in "by flow" mode, and only while the
-  // target actually has that flow.
-  int highlight = -1;
-  if (by_flow && selected_flow >= 0 && selected_flow < history.get_flow_count()) {
-    highlight = selected_flow;
+void RowView::tabulate(const TargetHistory& history, const ViewWindow& window,
+                       bool show_selection) {
+  FlowMask highlight = 0;
+  if (show_selection) {
+    int flow_count = history.get_flow_count();
+    FlowMask existing = flow_count >= 64 ? ~(FlowMask)0 : flow_bit(flow_count) - 1;
+    highlight = selection & existing;
   }
   if (tabulation.build_if_needed(history, window, highlight)) {
     tabulation_changed = true;
@@ -128,7 +164,15 @@ void RowView::tabulate(const TargetHistory& history, const ViewWindow& window, b
 }
 
 void RowView::toggle_flow(int flow) {
-  selected_flow = (selected_flow == flow) ? -1 : flow;
+  selection = (selection == flow_bit(flow)) ? 0 : flow_bit(flow);
+}
+
+void RowView::set_selection(FlowMask new_selection) {
+  selection = new_selection;
+}
+
+FlowMask RowView::get_selection() const {
+  return selection;
 }
 
 int RowView::flow_strip_at(const RowLayout& layout, ImVec2 point, int flow_count) const {
@@ -157,7 +201,8 @@ void RowView::describe_flow(int flow, char* out, size_t out_size) const {
   format_ms(stats.get_percentile(0.9), " 90%", percentile, sizeof(percentile));
   snprintf(out, out_size, "flow %d: %.1f%% loss, %d pkts, %s, %s\n%s", flow,
            100.0 * stats.lost / total, total, average, percentile,
-           flow == selected_flow ? "click to clear the highlight" : "click to highlight this flow");
+           selection == flow_bit(flow) ? "click to clear the highlight"
+                                       : "click to highlight this flow");
 }
 
 // The heatmap color for a cell holding `count` replies when the fullest cell
@@ -198,7 +243,7 @@ static uint32_t cell_color(int count, int largest, double brightness, double flo
 void RowView::update_texture(const FrameContext& frame) {
   int columns = frame.window.columns;
   int rows = frame.window.rows;
-  int highlight = tabulation.get_selected_flow();
+  FlowMask highlight = tabulation.get_selection();
   if (!tabulation_changed && colored_with_largest == frame.largest_cell &&
       colored_with_highlight == highlight && texture_columns == columns &&
       texture_rows == rows) {
@@ -215,7 +260,7 @@ void RowView::update_texture(const FrameContext& frame) {
         continue;
       }
       uint32_t color;
-      if (highlight < 0) {
+      if (highlight == 0) {
         color = cell_color(count, largest, 1.0, 0.30);
       } else {
         int selected = tabulation.get_selected_count(column, row);
@@ -329,7 +374,6 @@ void RowView::draw_graph(ImDrawList* draw_list, const RowLayout& layout,
   float inset_width = (float)(window.columns * CELL_WIDTH);
   float inset_height = (float)(window.rows * CELL_HEIGHT);
   ImVec2 inset_max(layout.inset_min.x + inset_width, layout.inset_min.y + inset_height);
-  float height = layout.graph_max.y - layout.graph_min.y;
 
   draw_list->AddRectFilled(layout.graph_min, layout.graph_max, IM_COL32(0, 0, 0, 255));
   if (texture != 0) {
@@ -340,7 +384,11 @@ void RowView::draw_graph(ImDrawList* draw_list, const RowLayout& layout,
   // flow selected, the whole bar is dimmed and the part of it that belongs
   // to the selected flow is drawn normally from the bottom up - so its
   // height is that flow's share of the column's packets that were lost.
-  bool highlighting = tabulation.get_selected_flow() >= 0;
+  //
+  // Pings a router refused (ICMP Destination Unreachable and friends) are
+  // loss too, but drawn dotted, at the bottom of the bar: "refused" and
+  // "vanished" point at different problems.
+  bool highlighting = tabulation.get_selection() != 0;
   for (int column = 0; column < window.columns; column++) {
     int lost = tabulation.get_column_lost(column);
     if (lost == 0) {
@@ -349,8 +397,19 @@ void RowView::draw_graph(ImDrawList* draw_list, const RowLayout& layout,
     double total = tabulation.get_column_total(column);
     float x = layout.inset_min.x + column * CELL_WIDTH + CELL_WIDTH / 2 + 0.5f;
     float top = inset_max.y - (float)(lost / total) * inset_height;
-    draw_list->AddLine(ImVec2(x, inset_max.y), ImVec2(x, top),
-                       highlighting ? COLOR_LOSS_DIM : COLOR_LOSS, 1.0f);
+    ImU32 loss_color = highlighting ? COLOR_LOSS_DIM : COLOR_LOSS;
+    int unreachable = tabulation.get_column_unreachable(column);
+    float dotted_top = inset_max.y - (float)(unreachable / total) * inset_height;
+    if (unreachable > 0) {
+      // Two pixels on, one off.
+      for (float y = inset_max.y; y > dotted_top; y -= 3.0f) {
+        float dash_top = y - 2.0f < dotted_top ? dotted_top : y - 2.0f;
+        draw_list->AddRectFilled(ImVec2(x - 0.5f, dash_top), ImVec2(x + 0.5f, y), loss_color);
+      }
+    }
+    if (dotted_top > top) {
+      draw_list->AddLine(ImVec2(x, dotted_top), ImVec2(x, top), loss_color, 1.0f);
+    }
     if (highlighting) {
       int selected_lost = tabulation.get_selected_column_lost(column);
       if (selected_lost > 0) {
@@ -365,10 +424,12 @@ void RowView::draw_graph(ImDrawList* draw_list, const RowLayout& layout,
     draw_log_grid(draw_list, layout, window);
   } else {
     // Linear: five evenly spaced lines, latency labels on the left and loss
-    // labels on the right sharing them.
+    // labels on the right sharing them. Positioned on the cell grid (the
+    // inset), which is where the cells and loss bars are drawn - not on the
+    // slightly taller graph box around it.
     for (int division = 0; division < VERTICAL_LABEL_DIVISIONS; division++) {
       double k = (double)division / VERTICAL_LABEL_DIVISIONS;
-      float y = floorf(layout.graph_min.y + (float)k * height);
+      float y = floorf(layout.inset_min.y + (float)k * inset_height);
       if (division > 0) {
         draw_list->AddLine(ImVec2(layout.graph_min.x, y + 0.5f),
                            ImVec2(layout.graph_max.x, y + 0.5f), COLOR_GRID);
@@ -382,35 +443,8 @@ void RowView::draw_graph(ImDrawList* draw_list, const RowLayout& layout,
     }
   }
 
-  // Vertical time grid. The lines sit on round local clock times (every 30
-  // seconds, every 5 minutes, every hour...), labeled with that time. Since
-  // they're pinned to times, they belong to the data: when the graph steps
-  // left by a column, the lines step with it, and their labels never change.
-  double span = window.end - window.start;
-  int spacing_index = 0;
-  while (spacing_index < TIME_GRID_SPACING_COUNT - 1 &&
-         span / 6.0 >= TIME_GRID_SPACINGS[spacing_index]) {
-    spacing_index++;
-  }
-  double spacing = TIME_GRID_SPACINGS[spacing_index];
-  // Never draw a line in the future: while following, the right edge is
-  // rounded up past "now" to finish the current column.
-  double right = window.end < frame.now ? window.end : frame.now;
-  double offset = local_utc_offset(right);
-  double newest_line = floor((right + offset) / spacing) * spacing - offset;
-  for (double line_time = newest_line; line_time > window.start; line_time -= spacing) {
-    double fraction = (line_time - window.start) / span;
-    float x = floorf(layout.inset_min.x + (float)fraction * inset_width);
-    draw_list->AddLine(ImVec2(x + 0.5f, layout.graph_min.y), ImVec2(x + 0.5f, layout.graph_max.y),
-                       COLOR_GRID);
-    format_clock_time(line_time, spacing, text, sizeof(text));
-    // Labels sit to the left of their line; skip one that would hang off the
-    // left edge of the graph rather than draw it cut in half.
-    if (x - 2 - ImGui::CalcTextSize(text).x >= layout.graph_min.x) {
-      draw_outlined_text(draw_list, ImVec2(x - 2, layout.graph_max.y - 1), COLOR_LABEL, text,
-                         true, true);
-    }
-  }
+  draw_time_grid(draw_list, layout.graph_min, layout.graph_max, layout.inset_min.x, inset_width,
+                 window, frame.now);
 
   // Crosshair, with latency and date/time at the mouse.
   if (frame.crosshair_visible) {
@@ -422,7 +456,7 @@ void RowView::draw_graph(ImDrawList* draw_list, const RowLayout& layout,
                        COLOR_CROSSHAIR);
 
     double latency = fraction_to_rtt(window, 1.0 - frame.crosshair_y);
-    double when = window.start + frame.crosshair_x * span;
+    double when = window.start + frame.crosshair_x * (window.end - window.start);
     time_t when_seconds = (time_t)when;
     struct tm local;
     localtime_r(&when_seconds, &local);
@@ -474,7 +508,7 @@ void RowView::draw_summary(ImDrawList* draw_list, const RowLayout& layout,
   float width = layout.summary_max.x - layout.summary_min.x;
   float inset_bottom = layout.inset_min.y + window.rows * CELL_HEIGHT;
   int flow_count = tabulation.get_flow_count();
-  int highlight = tabulation.get_selected_flow();
+  FlowMask highlight = tabulation.get_selection();
 
   draw_list->AddRectFilled(layout.summary_min, layout.summary_max, IM_COL32(0, 0, 0, 255));
 
@@ -485,11 +519,12 @@ void RowView::draw_summary(ImDrawList* draw_list, const RowLayout& layout,
     for (int flow = 0; flow < flow_count; flow++) {
       float x0 = floorf(layout.summary_min.x + 1 + flow * strip_width);
       float x1 = floorf(layout.summary_min.x + 1 + (flow + 1) * strip_width);
-      if (flow == highlight) {
+      bool selected = (highlight & flow_bit(flow)) != 0;
+      if (selected) {
         draw_list->AddRectFilled(ImVec2(x0, layout.summary_min.y + 1),
                                  ImVec2(x1, layout.summary_max.y - 1), COLOR_SELECTED_STRIP);
       }
-      double brightness = (highlight < 0 || flow == highlight) ? 1.0 : DIM;
+      double brightness = (highlight == 0 || selected) ? 1.0 : DIM;
       draw_histogram(draw_list, tabulation.get_stats(flow), largest, window.rows, x0 + 1,
                      x1 - x0 - 3, inset_bottom, 2.0f, brightness);
       if (flow > 0) {
@@ -501,7 +536,7 @@ void RowView::draw_summary(ImDrawList* draw_list, const RowLayout& layout,
       float label_width = ImGui::CalcTextSize(label).x;
       draw_outlined_text(draw_list,
                          ImVec2((x0 + x1) / 2 - label_width / 2, layout.summary_max.y - 1),
-                         flow == highlight ? COLOR_TEXT : COLOR_LABEL, label, false, true);
+                         selected ? COLOR_TEXT : COLOR_LABEL, label, false, true);
     }
   } else {
     // One histogram of every reply in the window.
@@ -511,28 +546,47 @@ void RowView::draw_summary(ImDrawList* draw_list, const RowLayout& layout,
   }
 
   // Statistics, top right: for the selected flow if there is one, otherwise
-  // for everything.
-  const FlowStats& stats = tabulation.get_stats(highlight);
+  // for everything. Each is a small label with its value on the line below,
+  // so the column can be narrow; the ones that don't fit the height are left
+  // off, least important last.
+  const FlowStats& stats =
+      highlight != 0 ? tabulation.get_selection_stats() : tabulation.get_stats(-1);
   if (stats.get_total() > 0) {
+    std::vector<std::pair<std::string, std::string> > items;
     char text[64];
+    if (highlight != 0) {
+      std::string flows = describe_flow_mask(highlight);
+      bool single = (highlight & (highlight - 1)) == 0;
+      items.push_back(std::make_pair(std::string(single ? "flow" : "flows"), flows));
+    }
+    snprintf(text, sizeof(text), "%.1f%%", 100.0 * stats.lost / stats.get_total());
+    items.push_back(std::make_pair(std::string("loss"), std::string(text)));
+    if (stats.unreachable > 0) {
+      snprintf(text, sizeof(text), "%.1f%%", 100.0 * stats.unreachable / stats.get_total());
+      items.push_back(std::make_pair(std::string("of it refused"), std::string(text)));
+    }
+    if (!stats.sorted_rtts.empty()) {
+      format_ms(stats.get_average(), "", text, sizeof(text));
+      items.push_back(std::make_pair(std::string("avg"), std::string(text)));
+      format_ms(stats.get_percentile(0.9), "", text, sizeof(text));
+      items.push_back(std::make_pair(std::string("90%"), std::string(text)));
+    }
+    snprintf(text, sizeof(text), "%d", stats.get_total());
+    items.push_back(std::make_pair(std::string("pkts"), std::string(text)));
+
     float x = layout.summary_max.x - 2;
     float y = layout.summary_min.y + 1;
     float line = ImGui::GetTextLineHeight();
-    if (highlight >= 0) {
-      snprintf(text, sizeof(text), "flow %d", highlight);
-      draw_outlined_text(draw_list, ImVec2(x, y), COLOR_TEXT, text, true, false);
-      y += line;
-    }
-    double loss = (double)stats.lost / stats.get_total();
-    snprintf(text, sizeof(text), "%.1f%% loss", loss * 100.0);
-    draw_outlined_text(draw_list, ImVec2(x, y), COLOR_STATS, text, true, false);
-    snprintf(text, sizeof(text), "%d pkts", stats.get_total());
-    draw_outlined_text(draw_list, ImVec2(x, y + line), COLOR_STATS, text, true, false);
-    if (!stats.sorted_rtts.empty()) {
-      format_ms(stats.get_average(), " avg", text, sizeof(text));
-      draw_outlined_text(draw_list, ImVec2(x, y + 2 * line), COLOR_STATS, text, true, false);
-      format_ms(stats.get_percentile(0.9), " 90%", text, sizeof(text));
-      draw_outlined_text(draw_list, ImVec2(x, y + 3 * line), COLOR_STATS, text, true, false);
+    for (size_t i = 0; i < items.size(); i++) {
+      if (y + 2 * line > layout.summary_max.y - 1) {
+        break;
+      }
+      draw_outlined_text(draw_list, ImVec2(x, y), COLOR_STATS_LABEL, items[i].first.c_str(), true,
+                         false);
+      draw_outlined_text(draw_list, ImVec2(x, y + line),
+                         (highlight != 0 && i == 0) ? COLOR_TEXT : COLOR_STATS,
+                         items[i].second.c_str(), true, false);
+      y += 2 * line;
     }
   }
 
