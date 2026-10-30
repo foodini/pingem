@@ -17,9 +17,6 @@ Daemon::Daemon(const DaemonConfig& config, IcmpSocket* icmp_socket, int listen_f
       listen_fd(listen_fd),
       packet_table(config.reply_expiry),
       next_target_id(1) {
-  // Start identifiers at a random point so two daemons (or a daemon restarted
-  // while old replies are still in flight) are unlikely to collide.
-  next_identifier = (uint16_t)(lrand48() & 0xffff);
 }
 
 // ---------------------------------------------------------------------------
@@ -175,13 +172,16 @@ void Daemon::send_due_packets(double now) {
 
 void Daemon::send_one(Target* target) {
   uint64_t full_sequence = target->next_sequence++;
-  uint16_t wire_sequence = (uint16_t)(full_sequence & 0xffff);
   int flow = -1;
   int fixed_checksum = -1;
+  int slot = 0;   // which identifier and wire counter
   if (target->flows > 0) {
     flow = (int)((full_sequence - 1) % (uint64_t)target->flows);
     fixed_checksum = target->flow_checksums[flow];
+    slot = flow;
   }
+  uint16_t identifier = target->flow_identifiers[slot];
+  uint16_t wire_sequence = target->flow_wire_sequence[slot]++;
 
   OutstandingPacket packet;
   packet.target_id = target->id;
@@ -193,7 +193,7 @@ void Daemon::send_one(Target* target) {
   packet.is_probe = false;
   packet.ttl = 0;
 
-  int error = icmp_socket->send_echo(target->address, target->identifier, wire_sequence,
+  int error = icmp_socket->send_echo(target->address, identifier, wire_sequence,
                                      target->packet_size, fixed_checksum, 0);
   if (error != target->last_send_error) {
     if (error != 0) {
@@ -208,7 +208,7 @@ void Daemon::send_one(Target* target) {
   // Recorded even if sendto() failed. No reply will ever match it, so it will
   // expire, and the client - which gets the "ping" event either way - will
   // count it as lost. A dead network should look like loss, not like silence.
-  packet_table.insert(target->identifier, wire_sequence, packet);
+  packet_table.insert(identifier, wire_sequence, packet);
   emit_ping(target, full_sequence, packet.send_realtime, flow);
 }
 
@@ -324,12 +324,14 @@ void Daemon::send_probe(Target* target) {
     target->probe_ttl++;
   }
 
-  uint64_t full_sequence = target->next_probe_sequence++;
-  uint16_t wire_sequence = (uint16_t)(full_sequence & 0xffff);
+  // On the wire, exactly like this flow's pings except for the TTL - and
+  // numbered from the same counter, so the two never collide.
+  uint16_t identifier = target->flow_identifiers[flow];
+  uint16_t wire_sequence = target->flow_wire_sequence[flow]++;
 
   OutstandingPacket packet;
   packet.target_id = target->id;
-  packet.full_sequence = full_sequence;
+  packet.full_sequence = 0;   // probes aren't numbered for the client
   packet.flow = flow;
   packet.is_probe = true;
   packet.ttl = ttl;
@@ -338,9 +340,9 @@ void Daemon::send_probe(Target* target) {
 
   // A failed send just becomes a "*" hop after the timeout. The ping path
   // already logs a dead network; no need to say it twice.
-  icmp_socket->send_echo(target->address, target->probe_identifier, wire_sequence,
+  icmp_socket->send_echo(target->address, identifier, wire_sequence,
                          target->packet_size, target->flow_checksums[flow], ttl);
-  packet_table.insert(target->probe_identifier, wire_sequence, packet);
+  packet_table.insert(identifier, wire_sequence, packet);
 }
 
 // ---------------------------------------------------------------------------
@@ -472,13 +474,19 @@ void Daemon::cancel_pending(PendingAdd* pending) {
   delete pending;
 }
 
+// A random identifier no live target is using. Random rather than counting
+// up, for the same reason the flow checksums are random: a load balancer
+// hashing identifiers with something simple could put a run of consecutive
+// values all in one bucket, hiding the paths we're looking for. (And two
+// daemons, or a restarted one with replies still in flight, are unlikely to
+// collide.)
 uint16_t Daemon::allocate_identifier() {
-  while (identifiers_in_use.count(next_identifier) != 0) {
-    next_identifier++;
+  while (true) {
+    uint16_t identifier = (uint16_t)(lrand48() & 0xffff);
+    if (identifiers_in_use.count(identifier) == 0) {
+      return identifier;
+    }
   }
-  uint16_t identifier = next_identifier;
-  next_identifier++;
-  return identifier;
 }
 
 void Daemon::start_target(PendingAdd* pending, Client* client, const struct in_addr& address) {
@@ -489,7 +497,6 @@ void Daemon::start_target(PendingAdd* pending, Client* client, const struct in_a
   target->name = pending->name;
   target->address = address;
   target->address_text = ipv4_to_string(address);
-  target->identifier = allocate_identifier();
   target->next_sequence = 1;
   target->interval = pending->interval;
   target->packet_size = pending->packet_size;
@@ -525,10 +532,18 @@ void Daemon::start_target(PendingAdd* pending, Client* client, const struct in_a
   double stagger_window = target->interval < 1.0 ? target->interval : 1.0;
   target->next_send_time = monotonic_now() + 0.01 + drand48() * stagger_window;
 
-  // Probing state. The probe identifier is separate from the pings' so the
-  // two can never be confused.
-  target->probe_identifier = allocate_identifier();
-  target->next_probe_sequence = 1;
+  // One identifier per flow (or just one without flows), each claimed at
+  // once so the next can't repeat it, and a wire sequence counter for each,
+  // starting anywhere.
+  int slots = target->flows > 0 ? target->flows : 1;
+  for (int slot = 0; slot < slots; slot++) {
+    uint16_t identifier = allocate_identifier();
+    target->flow_identifiers.push_back(identifier);
+    target->flow_wire_sequence.push_back((uint16_t)(lrand48() & 0xffff));
+    identifiers_in_use[identifier] = target->id;
+  }
+
+  // Probing state.
   target->probe_rate = 0.0;
   target->next_probe_time = -1.0;
   target->probe_flow = 0;
@@ -536,8 +551,6 @@ void Daemon::start_target(PendingAdd* pending, Client* client, const struct in_a
   target->destination_ttl.assign(target->flows, 0);
 
   targets[target->id] = target;
-  identifiers_in_use[target->identifier] = target->id;
-  identifiers_in_use[target->probe_identifier] = target->id;
   set_probe_rate(target, pending->probe_rate);
   client->targets_by_client_id[target->client_target_id] = target->id;
   schedule_by_time.insert(std::make_pair(target->next_send_time, target->id));
@@ -545,10 +558,9 @@ void Daemon::start_target(PendingAdd* pending, Client* client, const struct in_a
   queue_output(client,
                format_added(target->client_target_id, target->name, target->address_text));
 
-  log_message("client %d: target %d %s (%s) interval=%.3fs size=%d flows=%d probes=%g id=%u",
+  log_message("client %d: target %d %s (%s) interval=%.3fs size=%d flows=%d probes=%g",
               client->fd, target->id, target->name.c_str(), target->address_text.c_str(),
-              target->interval, target->packet_size, target->flows, target->probe_rate,
-              (unsigned)target->identifier);
+              target->interval, target->packet_size, target->flows, target->probe_rate);
 }
 
 void Daemon::destroy_target(Target* target) {
@@ -558,8 +570,9 @@ void Daemon::destroy_target(Target* target) {
   if (client_it != clients.end()) {
     client_it->second->targets_by_client_id.erase(target->client_target_id);
   }
-  identifiers_in_use.erase(target->identifier);
-  identifiers_in_use.erase(target->probe_identifier);
+  for (size_t slot = 0; slot < target->flow_identifiers.size(); slot++) {
+    identifiers_in_use.erase(target->flow_identifiers[slot]);
+  }
   packet_table.remove_target(target->id);
   // Its entry in schedule_by_time is left to fall out on its own.
   targets.erase(target->id);

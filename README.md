@@ -90,10 +90,13 @@ would show up as its own clump.
 
 **What a flow is.** pingem spreads each host's pings over 8 *flows* (round
 robin: ping 1 is flow 0, ping 2 is flow 1, ... ping 9 is flow 0 again). Every
-ping in a flow is built to have the same ICMP checksum, and the flows have
-different checksums. Routers that hash the checksum to pick a path will
-therefore send every ping in a flow down the same path - but different flows
-may go different ways.
+ping in a flow is built to have the same ICMP checksum and the same ICMP
+identifier, and each flow has its own of both. Routers that hash either one
+to pick a path will therefore send every ping in a flow down the same path -
+but different flows may go different ways. (Paris traceroute, where the
+idea comes from, varied only the checksum; but some balancers - the Comcast
+one this was developed behind, for one - hash the identifier instead, and
+ignore the checksum.)
 
 **The "by flow" view.** Click View (or press V) and each row's summary column
 splits into 8 small histograms, one per flow, numbered 0-7 underneath, all on
@@ -140,10 +143,10 @@ Now compare the clumps across the 8 histograms:
   schedule; Wi-Fi retransmits), a busy queue somewhere, or the far end. To
   find out where, add a row for each hop along the way (your router, your
   ISP's first router, ...) and see at which hop the second clump first
-  appears. One caveat: if the routers on your path ignore the checksum when
-  balancing ICMP (some hash only addresses), flows can't separate paths and
-  you'll see this picture even if there are several routes. The route
-  tracing planned below will tell those two cases apart.
+  appears. One caveat: if the routers on your path ignore both the checksum
+  and the identifier when balancing ICMP (some hash only addresses), flows
+  can't separate paths and you'll see this picture even if there are
+  several routes. The route view (below) tells those two cases apart.
 
   ![Every flow in both clumps](docs/images/by_flow_both.png)
 
@@ -209,8 +212,9 @@ Alongside its pings, user_icmp sends each host a slow trickle of *route
 probes* - traceroute, done carefully. A probe is a ping with a small TTL
 (time-to-live: the number of routers it may cross). The router where the TTL
 runs out drops it and sends back "Time Exceeded", which tells us who that
-router is. Probes use the same fixed checksums as the flows, so each flow's
-probes follow exactly the path its pings take. Probes go out at one per ping
+router is. A probe is identical to its flow's pings - same checksum, same
+identifier - except for the TTL, so each flow's probes follow exactly the
+path its pings take. Probes go out at one per ping
 interval normally, four while that host's route graph is open, always spaced
 evenly between the pings - never in bursts.
 
@@ -309,8 +313,9 @@ How the map is drawn:
   of its node is clearest.
 * **Bigger than the window?** Drag the map to move it, scroll over it to
   zoom; "Fit" shrinks it to fit, "100%" puts it back to full size.
-* As before, nothing moves on its own once drawn: when new routers turn up,
-  the "New routes found" button redoes the layout.
+* As in the one-host view, the layout is redone whenever a new router (or
+  silent hop) turns up, so expect some rearranging, mostly in the first
+  minute.
 
 **Traffic share.** Pings rotate evenly through the flows, so a router's
 share of a host's traffic is the average, over the flows, of the fraction of
@@ -326,8 +331,9 @@ A few more things worth knowing:
   traffic passing through it: answering a probe is a chore for its CPU, done
   when it gets around to it. See "Why per-hop RTTs lie" below. The RTTs that
   count are the target's.
-* The layout stays put once drawn, so nothing jumps around while you read it.
-  When new routers turn up, a "New routes found" button offers to redo it.
+* The layout stays put while the routers stay the same. When a new one turns
+  up, the map is laid out again - so it rearranges itself now and then,
+  mostly in the first minute or so.
 * If a target is anycast (many servers sharing one address), whichever copy
   answers is shown as the target.
 
@@ -442,8 +448,9 @@ A few things the C++ agent does differently:
 * ICMP errors about our pings (Destination Unreachable, Time Exceeded) are
   matched to the ping they quote and reported to the client at once, instead
   of leaving the ping to time out as "lost".
-* Route probes have their own ICMP identifier, so they can never be mistaken
-  for pings or counted as loss.
+* Route probes look exactly like their flow's pings on the wire (so they
+  take the same path), but the agent's table knows which outstanding packets
+  are probes, so a probe is never mistaken for a ping or counted as loss.
 
 # Be gentle
 Everything on the path between you and a target has queues. Back-to-back
@@ -461,13 +468,16 @@ the same way traceroute does. Two ideas from Paris traceroute make this work
 in the presence of load balancing:
 
 * **Flows.** Routers that spread traffic over parallel links mostly choose the
-  link by hashing header fields - for ICMP, that includes the ICMP checksum.
-  If we hold the checksum constant (by adjusting two "fudge" bytes in the
-  payload to cancel out the changing sequence number), every packet in that
-  "flow" takes the same forward path. Use several different fixed checksums and
-  you get several flows, which may take different paths.
-* **Probes share their flow's checksum,** so a TTL-limited probe follows the
-  same path as the ordinary pings in its flow. That's what lets a route
+  link by hashing header fields - for ICMP, the checksum, or the identifier.
+  If we hold both constant (the checksum by adjusting two "fudge" bytes in
+  the payload to cancel out the changing sequence number), every packet in
+  that "flow" takes the same forward path. Give each flow its own checksum
+  and its own identifier and you get several flows, which may take different
+  paths whichever field a balancer looks at. (Each flow also numbers its
+  packets on the wire with its own 16-bit counter; the 64-bit sequence
+  number the client sees stays in the agent's table.)
+* **Probes share their flow's checksum and identifier,** so a TTL-limited
+  probe follows the same path as the ordinary pings in its flow. That's what lets a route
   selected in the route graph light up in the heatmap: every reply belongs to
   a known flow, and every flow maps to a discovered path.
 

@@ -20,16 +20,19 @@
 //         interval=1 size=64 flows=0 probes=0.
 //
 //         flows=K (1..64) spreads the pings over K "flows". Every packet in a
-//         flow has the same ICMP checksum, so routers that load-balance by
-//         hashing header fields send the whole flow down the same path.
+//         flow has the same ICMP checksum AND the same ICMP identifier (each
+//         flow its own), so routers that load-balance by hashing header
+//         fields - whichever of the two they hash - send the whole flow down
+//         the same path, and different flows may take different paths.
 //         Ping n (counting from 1) belongs to flow (n-1) mod K. flows=0 (the
 //         default) leaves the checksum free to vary, as plain ping does.
 //
 //         probes=R also sends R route probes per ping interval (R may be a
 //         fraction; at most MAX_PROBE_RATE), spaced evenly between the
-//         pings - never in a burst. A probe is an echo request on one of the
-//         flows' checksums with a small TTL (1..MAX_PROBE_TTL), so it follows
-//         that flow's path and the router where it runs out of TTL answers
+//         pings - never in a burst. A probe is an echo request exactly like
+//         one flow's pings (same identifier, same checksum) but with a small
+//         TTL (1..MAX_PROBE_TTL), so it follows that flow's path and the
+//         router where it runs out of TTL answers
 //         "Time Exceeded", revealing itself. Probes walk every (flow, TTL)
 //         pair in turn; each answer is a "hop" event. Needs flows >= 1.
 //     probe <id> rate=<R>

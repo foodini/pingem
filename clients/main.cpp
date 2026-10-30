@@ -447,7 +447,7 @@ int main(int argc, char* argv[]) {
           route_checked.push_back(targets[i].id);
         }
         routes_open = true;
-        route_view.reset(monotonic_seconds());
+        route_view.reset();
       }
       all_routes_request = false;
     }
@@ -457,7 +457,7 @@ int main(int argc, char* argv[]) {
       } else if (!routes_open) {
         route_checked.assign(1, route_request);
         routes_open = true;
-        route_view.reset(monotonic_seconds());
+        route_view.reset();
       } else {
         toggle_request = route_request;   // add it
       }
@@ -822,6 +822,7 @@ int main(int argc, char* argv[]) {
         RouteViewEndpoint endpoint;
         endpoint.target_id = target.id;
         endpoint.name = target.history->get_name();
+        endpoint.address = target.history->get_address();
         endpoint.store = target.routes;
         endpoint.flow_count = target.history->get_flow_count();
         endpoint.color = endpoint_color(target.id);

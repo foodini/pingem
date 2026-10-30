@@ -28,10 +28,9 @@
 // traffic. Click one to select the flows that use it - they light up here
 // AND in the heatmaps; click empty space to clear.
 //
-// The layout is fixed once made, so nothing moves while you look at it.
-// When the graph grows nodes the layout doesn't have, a "New routes found"
-// button offers to redo it. (For the first few seconds after opening, or
-// after changing which endpoints are shown, it just redoes it.)
+// The layout stays put while the graph keeps the same nodes. When a router
+// (or silent hop) turns up that it doesn't place, it's laid out again - so
+// the map rearranges itself now and then, mostly in the first minute.
 
 #ifndef PINGEM_ROUTE_VIEW_H
 #define PINGEM_ROUTE_VIEW_H
@@ -53,6 +52,7 @@
 struct RouteViewEndpoint {
   int target_id;
   std::string name;
+  std::string address;       // the target's address (for finding our own, under "here")
   const RouteStore* store;
   int flow_count;
   ImU32 color;
@@ -73,8 +73,8 @@ public:
   RouteView();
 
   // Call when the view opens or the set of endpoints changes: forgets the
-  // layout. `now` is a monotonic clock in seconds.
-  void reset(double now);
+  // layout.
+  void reset();
 
   // Once per frame while open. Draws the graph in [area_min, area_max] and
   // handles the mouse there. Selections in *endpoints are updated by clicks.
@@ -97,7 +97,13 @@ private:
   RouteGraph graph;
   RouteLayout layout;
   bool have_layout;
-  double opened_at;
+  // This machine's address(es) for reaching the endpoints - shown under
+  // "here". Looked up again every half minute, in case DHCP changes them.
+  void update_local_addresses(const std::vector<RouteViewEndpoint>& endpoints, double now);
+  std::vector<std::string> local_addresses;
+  std::map<std::string, std::string> local_by_target;   // target address -> ours
+  double local_addresses_time;
+
   void center_view(float map_width, float map_height, float view_width, float view_height,
                    float top_room);
 

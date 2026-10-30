@@ -54,7 +54,10 @@ Scenarios (how each fake reply is delayed):
                            the ISP, three hops that never answer, then a
                            chain of eight routers, 127.0.2.1 - 127.0.2.8.
                127.0.0.15  leaves everyone else right after the home router,
-                           through the ISP's other box: 127.0.1.13, .14, .15.
+                           through the ISP's other boxes - and the box there
+                           balances by ICMP *identifier*, not checksum (as
+                           real ones do): 127.0.1.13 or 127.0.1.16, then
+                           127.0.1.14, 127.0.1.15.
 
              And the home router, 127.0.1.1, is rate-limited: it answers
              only about half the probes that run out of TTL there, the way
@@ -74,7 +77,7 @@ ADDRESSES = ['127.0.0.2', '127.0.0.3', '127.0.0.4', '127.0.0.5',
              '127.0.0.10', '127.0.0.11', '127.0.0.12', '127.0.0.13']
 ADDRESSES.append('127.0.0.14')
 ADDRESSES.append('127.0.0.15')
-ROUTERS = (['127.0.1.%d' % n for n in range(1, 16)] +
+ROUTERS = (['127.0.1.%d' % n for n in range(1, 17)] +
            ['127.0.2.%d' % n for n in range(1, 9)])
 ROUTE_TARGETS = ('127.0.0.10', '127.0.0.11', '127.0.0.12', '127.0.0.13', '127.0.0.14',
                  '127.0.0.15')
@@ -122,7 +125,7 @@ def delay_for(scenario, destination, checksum):
     return fast
 
 
-def route_answer(destination, checksum, ttl):
+def route_answer(destination, checksum, ttl, identifier=0):
     """For the routes scenario: (who answers, ICMP type, code, delay), or
     None for silence. Type 0 is the target's echo reply; 11 is a router's
     Time Exceeded; 3 is Destination Unreachable."""
@@ -132,7 +135,9 @@ def route_answer(destination, checksum, ttl):
         path = ['127.0.1.1', '127.0.1.2', '127.0.1.12' if flipped else '127.0.1.8',
                 '127.0.1.9']
     elif destination == '127.0.0.15':
-        path = ['127.0.1.1', '127.0.1.13', '127.0.1.14', '127.0.1.15']
+        by_identifier = hashlib.md5(struct.pack('!H', identifier)).digest()[0] & 1
+        path = ['127.0.1.1', '127.0.1.16' if by_identifier else '127.0.1.13',
+                '127.0.1.14', '127.0.1.15']
     elif destination == '127.0.0.14':
         path = (['127.0.1.1', '127.0.1.2', None, None, None] +
                 ['127.0.2.%d' % n for n in range(1, 9)])
@@ -215,7 +220,8 @@ def main():
         if scenario == 'routes':
             if destination not in ROUTE_TARGETS:
                 continue
-            answer = route_answer(destination, checksum, packet[8])
+            identifier = struct.unpack('!H', icmp[4:6])[0]
+            answer = route_answer(destination, checksum, packet[8], identifier)
             if answer is None:
                 continue
             responder, kind, code, delay = answer

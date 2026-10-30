@@ -7,14 +7,16 @@
 // remembered here, keyed by those 32 bits.
 //
 // Uniqueness of the key:
-//   * Each live target gets its own 16-bit identifier, so two targets never
-//     share a key even if they're pinging the same address.
-//   * Within a target, the 16-bit sequence number wraps every 65536 packets.
-//     Entries expire after `expiry_seconds`, and the daemon enforces a minimum
-//     interval, so as long as 65536 * min_interval > expiry_seconds a key can
-//     never be in the table twice. With the defaults (0.1 s, 60 s) that's 6553
-//     s vs 60 s. If it ever did happen, insert() overwrites the older entry,
-//     which is the right call: the older packet is the one that's long lost.
+//   * Each flow of each live target gets its own 16-bit identifier, so two
+//     flows never share a key, even when they're pinging the same address.
+//   * Within a flow, pings and route probes share one 16-bit sequence
+//     counter, which wraps every 65536 packets. Entries expire after
+//     `expiry_seconds`. A flow sends at most one ping per min_interval and
+//     (the probe rate is capped the same way) one probe, so as long as
+//     32768 * min_interval > expiry_seconds a key can never be in the table
+//     twice. With the defaults (0.1 s, 60 s) that's 3276 s vs 60 s. If it
+//     ever did happen, insert() overwrites the older entry, which is the
+//     right call: the older packet is the one that's long lost.
 
 #ifndef USER_ICMP_PACKET_TABLE_H
 #define USER_ICMP_PACKET_TABLE_H

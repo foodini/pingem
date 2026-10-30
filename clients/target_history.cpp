@@ -166,6 +166,10 @@ const std::vector<Sample>& TargetHistory::get_samples() const {
   return samples;
 }
 
+const std::string& TargetHistory::get_address() const {
+  return address;
+}
+
 const std::string& TargetHistory::get_name() const {
   return name;
 }

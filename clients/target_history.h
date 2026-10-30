@@ -69,6 +69,7 @@ public:
 
   const std::vector<Sample>& get_samples() const;
   const std::string& get_name() const;
+  const std::string& get_address() const;  // as resolved by user_icmp; empty until then
   const std::string& get_status() const;   // the one-line status shown above the graph
 
   // Increases whenever any sample is resolved. Views compare it with the

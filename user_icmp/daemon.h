@@ -89,27 +89,34 @@ private:
     std::string name;            // as the client gave it
     struct in_addr address;      // pinned at resolve time
     std::string address_text;
-    uint16_t identifier;         // our ICMP identifier for this target
-    uint64_t next_sequence;      // first packet is 1
+    uint64_t next_sequence;      // the next ping's sequence number; first is 1
     double interval;
     int packet_size;
-    // Flows: ping n uses flow (n-1) % flows, and every packet in flow f is
-    // sent with ICMP checksum flow_checksums[f]. flows == 0: free checksum.
+    // Flows: ping n uses flow (n-1) % flows. Every packet in flow f - ping
+    // or probe - carries ICMP identifier flow_identifiers[f] and checksum
+    // flow_checksums[f], so it looks identical to a load balancer whichever
+    // of the two it hashes. (Some hash the checksum, as Paris traceroute
+    // assumed; some, it turns out, hash the identifier.) Each flow numbers
+    // its packets on the wire with its own 16-bit counter.
+    //
+    // flows == 0: one identifier, and the checksum left free.
     int flows;
     std::vector<uint16_t> flow_checksums;
+    std::vector<uint16_t> flow_identifiers;   // max(flows, 1) of them
+    std::vector<uint16_t> flow_wire_sequence; // the next sequence number on the wire
     double next_send_time;       // monotonic
     int last_send_error;         // errno of the previous send, to avoid log spam
 
-    // Route probes: echo requests on the same flow checksums as the pings,
-    // but with a small TTL, so the router where the TTL runs out answers
-    // with Time Exceeded and reveals itself. They have their own identifier,
-    // so a probe can never be mistaken for a ping (or counted as loss).
+    // Route probes: echo requests exactly like their flow's pings - same
+    // identifier, same checksum, so the same path - but with a small TTL, so
+    // the router where the TTL runs out answers with Time Exceeded and
+    // reveals itself. The packet table remembers which outstanding packets
+    // are probes, so a probe is never mistaken for a ping (or counted as
+    // loss).
     //
     // They walk (flow, ttl) in rotation: every flow at TTL 1, then every
     // flow at TTL 2, ... up to where that flow reaches the target, then
     // around again.
-    uint16_t probe_identifier;
-    uint64_t next_probe_sequence;
     double probe_rate;           // probes per ping interval; 0 = none
     double next_probe_time;      // monotonic; < 0 when not probing
     int probe_flow;              // where the rotation is
@@ -187,7 +194,6 @@ private:
   std::set<int> clients_to_close;                 // fds
 
   int next_target_id;
-  uint16_t next_identifier;
 };
 
 #endif

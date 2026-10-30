@@ -3,13 +3,13 @@
 #include "row_view.h"   // draw_outlined_text, format_ms
 
 #include <algorithm>
+#include <arpa/inet.h>
 #include <math.h>
+#include <netinet/in.h>
 #include <stdio.h>
-
-// While the view is this new (seconds), a growing graph is simply laid out
-// again: the first probes are still arriving, and asking every second would
-// be silly.
-static const double SETTLING_SECONDS = 15.0;
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 static const float NODE_RADIUS = 6.0f;
 
@@ -55,7 +55,7 @@ static ImU32 scale_color(ImU32 color, float brightness) {
 
 RouteView::RouteView()
     : have_layout(false),
-      opened_at(0.0),
+      local_addresses_time(-1e9),
       hovered_endpoints(0),
       zoom(1.0f),
       pan(0, 0),
@@ -64,6 +64,64 @@ RouteView::RouteView()
       pan_moved(false),
       pan_mouse(0, 0),
       pan_start(0, 0) {
+}
+
+// Which of our addresses the kernel would send from to reach `target`: a
+// UDP socket "connected" to it picks a route and a source address without
+// sending anything, and getsockname() reports the source.
+static std::string local_address_toward(const std::string& target) {
+  struct sockaddr_in remote;
+  memset(&remote, 0, sizeof(remote));
+  remote.sin_family = AF_INET;
+  remote.sin_port = htons(9);   // any port will do; nothing is sent
+  if (inet_pton(AF_INET, target.c_str(), &remote.sin_addr) != 1) {
+    return std::string();
+  }
+  int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  if (fd < 0) {
+    return std::string();
+  }
+  std::string result;
+  struct sockaddr_in local;
+  socklen_t length = sizeof(local);
+  if (connect(fd, (struct sockaddr*)&remote, sizeof(remote)) == 0 &&
+      getsockname(fd, (struct sockaddr*)&local, &length) == 0) {
+    char text[INET_ADDRSTRLEN];
+    if (inet_ntop(AF_INET, &local.sin_addr, text, sizeof(text)) != NULL) {
+      result = text;
+    }
+  }
+  close(fd);
+  return result;
+}
+
+void RouteView::update_local_addresses(const std::vector<RouteViewEndpoint>& endpoints,
+                                       double now) {
+  bool missing = false;
+  for (size_t e = 0; e < endpoints.size(); e++) {
+    if (!endpoints[e].address.empty() && local_by_target.count(endpoints[e].address) == 0) {
+      missing = true;
+    }
+  }
+  if (!missing && now - local_addresses_time < 30.0) {
+    return;
+  }
+  local_addresses_time = now;
+  local_by_target.clear();
+  local_addresses.clear();
+  for (size_t e = 0; e < endpoints.size(); e++) {
+    const std::string& target = endpoints[e].address;
+    if (target.empty() || local_by_target.count(target) != 0) {
+      continue;
+    }
+    std::string ours = local_address_toward(target);
+    local_by_target[target] = ours;
+    if (!ours.empty() &&
+        std::find(local_addresses.begin(), local_addresses.end(), ours) == local_addresses.end()) {
+      local_addresses.push_back(ours);
+    }
+  }
+  std::sort(local_addresses.begin(), local_addresses.end());
 }
 
 void RouteView::center_view(float map_width, float map_height, float view_width,
@@ -81,12 +139,11 @@ uint64_t RouteView::get_hovered_endpoints() const {
   return hovered_endpoints;
 }
 
-void RouteView::reset(double now) {
+void RouteView::reset() {
   have_layout = false;
   view_touched = false;
   panning = false;
   hovered_endpoints = 0;
-  opened_at = now;
   layout.positions.clear();
 }
 
@@ -257,7 +314,21 @@ void RouteView::describe_node(const RouteNode& node,
   char line[512];
   std::string text;
   if (node.kind == NODE_HERE) {
-    *out = "here: this machine, where every path starts";
+    text = "here: this machine, where every path starts";
+    if (local_addresses.size() == 1) {
+      text += "\nits address on the way out: " + local_addresses[0];
+    } else if (local_addresses.size() > 1) {
+      // Different endpoints leave by different interfaces: say which.
+      text += "\nits addresses on the way out:";
+      for (size_t e = 0; e < endpoints.size(); e++) {
+        std::map<std::string, std::string>::const_iterator found =
+            local_by_target.find(endpoints[e].address);
+        if (found != local_by_target.end() && !found->second.empty()) {
+          text += "\n  " + found->second + " to " + endpoints[e].name;
+        }
+      }
+    }
+    *out = text;
     return;
   }
   if (node.kind == NODE_SILENT) {
@@ -418,8 +489,10 @@ void RouteView::draw(ImDrawList* draw_list, ImVec2 area_min, ImVec2 area_max,
   }
   if (ids != shown_ids) {
     shown_ids = ids;
-    reset(now);
+    reset();
   }
+
+  update_local_addresses(endpoints, now);
 
   std::vector<RouteEndpoint> sources;
   for (int e = 0; e < endpoint_count; e++) {
@@ -466,6 +539,10 @@ void RouteView::draw(ImDrawList* draw_list, ImVec2 area_min, ImVec2 area_max,
     if (node.kind == NODE_HERE) {
       label.title = "here";
       label.title_color = COLOR_HERE;
+      for (size_t k = 0; k < local_addresses.size(); k++) {
+        label.lines.push_back(local_addresses[k]);
+        label.colors.push_back(COLOR_TEXT);
+      }
     } else if (node.kind == NODE_SILENT) {
       std::string run = run_length_text(node);
       if (!run.empty()) {
@@ -534,15 +611,13 @@ void RouteView::draw(ImDrawList* draw_list, ImVec2 area_min, ImVec2 area_max,
     edge_pixels[k] = total + STRIPE_GAP * (stripes > 0 ? stripes - 1 : 0);
   }
 
-  // Keep the layout, unless it's missing nodes. Then: redo it quietly while
-  // the view is new, otherwise offer to. With several endpoints, also the
-  // buttons to fit the map in the window or show it at full size.
-  bool settling = now - opened_at < SETTLING_SECONDS;
-  bool redo = !have_layout || (settling && !layout.places_all(graph));
-  bool offer_redo = !redo && !layout.places_all(graph);
+  // Keep the layout until the graph has a node it doesn't place; then redo
+  // it. With several endpoints, also the buttons to fit the map in the
+  // window or show it at full size.
+  bool redo = !have_layout || !layout.places_all(graph);
   bool fit_pressed = false;
   bool full_pressed = false;
-  if (offer_redo || several) {
+  if (several) {
     ImGui::SetNextWindowPos(ImVec2(area_max.x - 6, area_min.y + 4), 0, ImVec2(1.0f, 0.0f));
     ImGui::SetNextWindowBgAlpha(0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -550,33 +625,19 @@ void RouteView::draw(ImDrawList* draw_list, ImVec2 area_min, ImVec2 area_max,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
                      ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove);
-    if (offer_redo) {
-      if (ImGui::Button("New routes found - redo the layout")) {
-        redo = true;
-      }
-      if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("The graph has routers the current picture doesn't show.\n"
-                          "Nothing moves until you ask, so you don't lose your place.");
-      }
-      if (several) {
-        ImGui::SameLine();
-      }
+    if (ImGui::Button("Fit")) {
+      fit_pressed = true;
     }
-    if (several) {
-      if (ImGui::Button("Fit")) {
-        fit_pressed = true;
-      }
-      if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Shrink the map to fit the window.\n"
-                          "Drag the map to move it; scroll over it to zoom.");
-      }
-      ImGui::SameLine();
-      if (ImGui::Button("100%")) {
-        full_pressed = true;
-      }
-      if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Show the map at full size");
-      }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Shrink the map to fit the window.\n"
+                        "Drag the map to move it; scroll over it to zoom.");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("100%")) {
+      full_pressed = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Show the map at full size");
     }
     ImGui::End();
     ImGui::PopStyleVar();

@@ -212,8 +212,8 @@ int main(int argc, char* argv[]) {
     return 2;
   }
   // See packet_table.h: the 16-bit sequence must not wrap within the expiry.
-  if (65536.0 * config.min_interval <= config.reply_expiry) {
-    fprintf(stderr, "user_icmp: --reply-expiry must be less than 65536 * --min-interval\n");
+  if (32768.0 * config.min_interval <= config.reply_expiry) {
+    fprintf(stderr, "user_icmp: --reply-expiry must be less than 32768 * --min-interval\n");
     return 2;
   }
 
