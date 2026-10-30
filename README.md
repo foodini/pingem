@@ -275,9 +275,13 @@ hops that never answer ("*x3") and then a long chain of routers, which is
 stacked into a column.*
 
 The heatmaps make way for a time strip at the top, with a lane per host.
-Each lane is shaded where there's data, has a red bar where pings were lost,
-and a tick wherever one of that host's paths changed - usually the moments
-worth looking at. (Above, 127.0.0.12's route flips every 45 seconds.) The
+Each lane is a squashed copy of that host's heatmap, on its own scale: from
+its fastest reply at the bottom to its 99th percentile at the top (the
+slowest 1% are drawn at the top), linear or log as the Scale button says,
+so even a quiet host shows its texture -
+hover over a lane for its numbers. It also has a red bar where pings were
+lost, and a tick wherever one of that host's paths changed - usually the
+moments worth looking at. (Above, 127.0.0.12's route flips every 45 seconds.) The
 strip works like a heatmap: scroll to zoom, drag to move back in time, End
 to follow "now" again, and the map shows the routes as they were. Each
 lane's name is a checkbox that adds the host to the map or takes it off; with

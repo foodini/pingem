@@ -48,7 +48,7 @@ double rtt_to_fraction(const ViewWindow& window, double rtt) {
     }
     fraction = log(rtt / window.min_rtt) / log(window.max_rtt / window.min_rtt);
   } else {
-    fraction = rtt / window.max_rtt;
+    fraction = (rtt - window.min_rtt) / (window.max_rtt - window.min_rtt);
   }
   if (fraction < 0.0) fraction = 0.0;
   if (fraction > 1.0) fraction = 1.0;
@@ -59,7 +59,7 @@ double fraction_to_rtt(const ViewWindow& window, double fraction) {
   if (window.log_scale) {
     return window.min_rtt * pow(window.max_rtt / window.min_rtt, fraction);
   }
-  return fraction * window.max_rtt;
+  return window.min_rtt + fraction * (window.max_rtt - window.min_rtt);
 }
 
 double max_rtt_in_window(const TargetHistory& history, double start, double end) {

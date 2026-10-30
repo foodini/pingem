@@ -14,7 +14,7 @@
 // out (route_graph.cpp, above compute_multi), and takes nearly the whole
 // window. It can come out bigger than the window: drag it to move it, scroll
 // to zoom, "Fit" to fit. Above it, a thin time strip has one lane per
-// endpoint: shaded where there's data, red bars for loss, and a tick
+// endpoint: a squashed heatmap of its pings, red bars for loss, and a tick
 // wherever one of that endpoint's paths changed - the moments worth
 // scrubbing to. Drag and scroll the strip as you would a heatmap. Each
 // endpoint has a color; a link used by several endpoints is drawn as
@@ -121,24 +121,41 @@ private:
   ImVec2 pan_start;             // the pan then
 };
 
+// The time strip's lanes: this tall (unless the font is taller), with the
+// heatmap in cells this tall.
+const float ROUTE_LANE_HEIGHT = 40.0f;
+const int ROUTE_LANE_CELL_HEIGHT = 2;
+
+// How many RTT rows a lane's heatmap has.
+int route_lane_rows(float lane_height);
+
 // One lane of the time strip.
 struct RouteLane {
   ImU32 color;
+  std::string name;
   const RouteStore* store;
   const Tabulation* tabulation;   // the endpoint's pings, tabulated for the strip's window
+  // The same pings, tabulated on the lane's own scale: from the fastest reply
+  // to the 99th percentile, linear or log as the rows are, route_lane_rows()
+  // rows. NULL if there were no replies.
+  const Tabulation* heatmap;
+  double scale_min;               // seconds: that scale's bottom...
+  double scale_max;               // ...and top
   bool lit;                       // the mouse is on something of this endpoint's
   bool on_map;                    // shown on the map (if not, the lane is dimmed)
 };
 
 // The time strip above the all-routes graph: one lane per target, drawn
 // in [box_min, box_max]; the lanes' cells start at inset_x, one per column of
-// `window`, CELL_WIDTH wide. Clock-time grid lines and labels as on the
-// heatmaps; a crosshair line at crosshair_x (0..1 across the cells) if
-// crosshair_visible. The lanes' names are their checkboxes, drawn by the
-// caller.
+// `window`, CELL_WIDTH wide. Each lane is a squashed heatmap of its host's
+// pings, on its own scale, with red bars for loss and a tick wherever a path
+// changed; a stripe of the host's color at its left edge. Clock-time grid
+// lines and labels as on the heatmaps; a crosshair line at crosshair_x (0..1
+// across the cells) if crosshair_visible. Hovering a lane shows its scale.
+// The lanes' names are their checkboxes, drawn by the caller.
 void draw_route_lanes(ImDrawList* draw_list, ImVec2 box_min, ImVec2 box_max, float inset_x,
                       float lane_height, const std::vector<RouteLane>& lanes,
                       const ViewWindow& window, double now, bool crosshair_visible,
-                      double crosshair_x);
+                      double crosshair_x, bool mouse_is_ours);
 
 #endif

@@ -207,16 +207,18 @@ void RowView::describe_flow(int flow, char* out, size_t out_size) const {
 
 // The heatmap color for a cell holding `count` replies when the fullest cell
 // holds `largest` (same formula as the JS version): dim to bright blue-white
-// with how full it is; the fullest cell itself red, unless every cell holds a
-// single reply, when "fullest" means nothing and everything would be red.
-// `brightness` < 1 dims it, and dimmed cells are never red. `floor` is the
-// intensity of a cell holding a single reply: 0.30 normally; higher for a
-// highlighted flow, so even its sparsest cells stand out from the dimmed rest.
-static uint32_t cell_color(int count, int largest, double brightness, double floor) {
+// with how full it is; the fullest cell itself red (if mark_fullest), unless
+// every cell holds a single reply, when "fullest" means nothing and
+// everything would be red. `brightness` < 1 dims it, and dimmed cells are
+// never red. `floor` is the intensity of a cell holding a single reply: 0.30
+// normally; higher for a highlighted flow, so even its sparsest cells stand
+// out from the dimmed rest.
+uint32_t heatmap_cell_color(int count, int largest, double brightness, double floor,
+                            bool mark_fullest) {
   uint8_t red;
   uint8_t green;
   uint8_t blue;
-  if (count == largest && largest > 1 && brightness >= 1.0) {
+  if (mark_fullest && count == largest && largest > 1 && brightness >= 1.0) {
     red = 255;
     green = 0;
     blue = 0;
@@ -261,13 +263,13 @@ void RowView::update_texture(const FrameContext& frame) {
       }
       uint32_t color;
       if (highlight == 0) {
-        color = cell_color(count, largest, 1.0, 0.30);
+        color = heatmap_cell_color(count, largest, 1.0, 0.30, true);
       } else {
         int selected = tabulation.get_selected_count(column, row);
         if (selected > 0) {
-          color = cell_color(selected, largest_selected, 1.0, 0.70);
+          color = heatmap_cell_color(selected, largest_selected, 1.0, 0.70, true);
         } else {
-          color = cell_color(count, largest, DIM, 0.30);
+          color = heatmap_cell_color(count, largest, DIM, 0.30, true);
         }
       }
       // Texture row 0 is the top of the image; RTT bucket 0 is the bottom.

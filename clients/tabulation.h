@@ -42,7 +42,9 @@ struct ViewWindow {
   int rows;
   double max_rtt;     // RTT at the top of the graph, seconds
   // Log scale: the vertical axis is logarithmic from min_rtt (the bottom
-  // edge) to max_rtt. Linear scale: from 0 to max_rtt, and min_rtt is unused.
+  // edge) to max_rtt. Linear scale: linear from min_rtt to max_rtt (the
+  // heatmap rows use 0 for min_rtt; the route view's lanes use the fastest
+  // reply).
   bool log_scale;
   double min_rtt;
 

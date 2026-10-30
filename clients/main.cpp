@@ -109,6 +109,7 @@ struct Target {
   TargetHistory* history;
   RouteStore* routes;
   RowView* row;
+  Tabulation* lane;   // its lane in the all-routes time strip, on the lane's own scale
 };
 
 static Target* find_target(std::vector<Target>& targets, int id) {
@@ -313,6 +314,7 @@ int main(int argc, char* argv[]) {
     target.history = new TargetHistory(hosts[i]);
     target.routes = new RouteStore();
     target.row = new RowView();
+    target.lane = new Tabulation();
     targets.push_back(target);
   }
   DaemonLink link(specs);
@@ -490,6 +492,7 @@ int main(int argc, char* argv[]) {
         if (targets[i].id == close_request) {
           link.remove_target(close_request);
           delete targets[i].row;
+          delete targets[i].lane;
           delete targets[i].routes;
           delete targets[i].history;
           targets.erase(targets.begin() + i);
@@ -596,7 +599,7 @@ int main(int argc, char* argv[]) {
     // The all-routes time strip: a heading line, then one lane per target
     // (shown on the map or not, so the lanes - and their checkboxes - don't
     // move as you check and uncheck), then room for the clock labels.
-    float lane_height = line_height + 3.0f;
+    float lane_height = std::max(ROUTE_LANE_HEIGHT, line_height + 3.0f);
     ImVec2 strip_min(margin, margin + status_height);
     ImVec2 strip_max(display_width - margin,
                      strip_min.y + targets.size() * lane_height + line_height + 4.0f);
@@ -611,7 +614,7 @@ int main(int argc, char* argv[]) {
           label_column = width;
         }
       }
-      label_column += line_height + 14.0f;
+      label_column += line_height + 18.0f;   // the checkbox, and room for the color stripe
       float cells_width = strip_max.x - strip_min.x - label_column - 2;
       columns = (int)(cells_width / CELL_WIDTH);
       if (columns < 1) columns = 1;
@@ -651,7 +654,7 @@ int main(int argc, char* argv[]) {
       view.min_rtt = pow(10.0, ceil(log10(fastest)) - 1.0);
     }
     if (!log_scale) {
-      view.min_rtt = 0.0;   // unused; keeps the fastest reply from forcing re-tabulation
+      view.min_rtt = 0.0;   // linear from zero (and the fastest reply can't force re-tabulation)
     }
 
     // ---- 5. Crosshair and zoom: is the mouse over any row's cell grid, or
@@ -843,8 +846,8 @@ int main(int argc, char* argv[]) {
 
       if (routes_several) {
         draw_outlined_text(draw_list, ImVec2(margin + 2, margin + 1), IM_COL32(255, 255, 255, 255),
-                           "Each lane: shaded where there's data, red for loss, a tick where a "
-                           "path changed. Drag or scroll it to move in time.",
+                           "Lanes: each host's heatmap on its own scale (hover for it), red for "
+                           "loss, a tick where a path changed. Drag or scroll to move in time.",
                            false, false);
         std::vector<RouteLane> lanes;
         uint64_t lit = route_view.get_hovered_endpoints();
@@ -853,8 +856,33 @@ int main(int argc, char* argv[]) {
           target.row->tabulate(*target.history, view, false);
           RouteLane lane;
           lane.color = endpoint_color(target.id);
+          lane.name = target.history->get_name();
           lane.store = target.routes;
           lane.tabulation = &target.row->get_tabulation();
+          // The lane's own scale: from the fastest reply to the 99th
+          // percentile, linear or log as the rows are; the slowest 1% are
+          // drawn at the top.
+          const FlowStats& stats = lane.tabulation->get_stats(-1);
+          lane.heatmap = NULL;
+          lane.scale_min = 0.0;
+          lane.scale_max = 0.0;
+          if (!stats.sorted_rtts.empty()) {
+            ViewWindow lane_view = view;
+            lane_view.rows = route_lane_rows(lane_height);
+            lane_view.log_scale = log_scale;
+            lane_view.min_rtt = std::max((double)stats.sorted_rtts[0], 0.000001);
+            lane_view.max_rtt = stats.get_percentile(0.99);
+            if (lane_view.max_rtt - lane_view.min_rtt < 0.0005) {
+              // Nearly all the same: half a millisecond, centred on them.
+              double middle = (lane_view.max_rtt + lane_view.min_rtt) / 2.0;
+              lane_view.min_rtt = std::max(middle - 0.00025, 0.000001);
+              lane_view.max_rtt = middle + 0.00025;
+            }
+            target.lane->build_if_needed(*target.history, lane_view, 0);
+            lane.heatmap = target.lane;
+            lane.scale_min = lane_view.min_rtt;
+            lane.scale_max = lane_view.max_rtt;
+          }
           lane.lit = false;
           lane.on_map = false;
           for (size_t e = 0; e < endpoints.size(); e++) {
@@ -866,13 +894,15 @@ int main(int argc, char* argv[]) {
           lanes.push_back(lane);
         }
         draw_route_lanes(draw_list, strip_min, strip_max, strip_inset_x, lane_height, lanes, view,
-                         now, frame.crosshair_visible, frame.crosshair_x);
+                         now, frame.crosshair_visible, frame.crosshair_x,
+                         mouse_is_ours && !dragging);
       }
 
       // The checkboxes choosing which targets the map shows: in the lanes,
       // as their labels, with all routes showing; under the title with one.
       if (routes_several) {
-        ImGui::SetNextWindowPos(ImVec2(strip_min.x + 3, strip_min.y + 1));
+        ImGui::SetNextWindowPos(
+            ImVec2(strip_min.x + 3, strip_min.y + 1 + floorf((lane_height - line_height) / 2)));
         ImGui::SetNextWindowBgAlpha(0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2, 0));
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, lane_height - line_height));
@@ -884,6 +914,9 @@ int main(int argc, char* argv[]) {
       }
       ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
                           routes_several ? ImVec2(0, 0) : ImGui::GetStyle().WindowPadding);
+      // In the lanes, no box around the names: the lane separators do that.
+      ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize,
+                          routes_several ? 0.0f : ImGui::GetStyle().WindowBorderSize);
       ImGui::Begin("route_endpoints", NULL,
                    ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
@@ -929,7 +962,7 @@ int main(int argc, char* argv[]) {
         ImGui::PopID();
       }
       ImGui::End();
-      ImGui::PopStyleVar(3);
+      ImGui::PopStyleVar(4);
     }
     if (targets.empty()) {
       draw_outlined_text(draw_list, ImVec2(margin + 4, margin + 4), IM_COL32(255, 255, 255, 255),
@@ -955,6 +988,7 @@ int main(int argc, char* argv[]) {
   // Textures belong to the GL context, so the rows go first.
   for (size_t i = 0; i < targets.size(); i++) {
     delete targets[i].row;
+    delete targets[i].lane;
     delete targets[i].routes;
     delete targets[i].history;
   }

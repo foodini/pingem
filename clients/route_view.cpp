@@ -15,6 +15,7 @@ static const float NODE_RADIUS = 6.0f;
 
 static const ImU32 COLOR_BACKGROUND = IM_COL32(0, 0, 0, 255);
 static const ImU32 COLOR_BORDER = IM_COL32(128, 128, 128, 255);
+static const ImU32 COLOR_LANE_SEPARATOR = IM_COL32(110, 110, 110, 255);
 static const ImU32 COLOR_EDGE = IM_COL32(120, 130, 170, 255);
 static const ImU32 COLOR_EDGE_DIM = IM_COL32(55, 58, 70, 255);
 static const ImU32 COLOR_EDGE_LIT = IM_COL32(255, 225, 110, 255);
@@ -1088,13 +1089,21 @@ void RouteView::draw(ImDrawList* draw_list, ImVec2 area_min, ImVec2 area_max,
 // The time strip
 // ---------------------------------------------------------------------------
 
+int route_lane_rows(float lane_height) {
+  int rows = (int)((lane_height - 2.0f) / ROUTE_LANE_CELL_HEIGHT);
+  return rows > 1 ? rows : 1;
+}
+
 void draw_route_lanes(ImDrawList* draw_list, ImVec2 box_min, ImVec2 box_max, float inset_x,
                       float lane_height, const std::vector<RouteLane>& lanes,
                       const ViewWindow& window, double now, bool crosshair_visible,
-                      double crosshair_x) {
+                      double crosshair_x, bool mouse_is_ours) {
   draw_list->AddRectFilled(box_min, box_max, COLOR_BACKGROUND);
   float inset_width = (float)(window.columns * CELL_WIDTH);
   double epoch = (window.end - window.start) / window.columns;
+  int rows = route_lane_rows(lane_height);
+  ImVec2 mouse = ImGui::GetIO().MousePos;
+  int hovered_lane = -1;
 
   for (size_t k = 0; k < lanes.size(); k++) {
     const RouteLane& lane = lanes[k];
@@ -1102,22 +1111,48 @@ void draw_route_lanes(ImDrawList* draw_list, ImVec2 box_min, ImVec2 box_max, flo
     float bottom = top + lane_height - 1;
     const Tabulation& tabulation = *lane.tabulation;
     float brightness = lane.on_map ? 1.0f : 0.4f;
-    ImU32 shade = scale_color(lane.color, (lane.lit ? 0.45f : 0.22f) * brightness);
     ImU32 mark = scale_color(lane.color, brightness);
-    for (int column = 0; column < window.columns; column++) {
-      int total = tabulation.get_column_total(column);
-      if (total == 0) {
-        continue;
-      }
-      float x0 = inset_x + column * CELL_WIDTH;
-      draw_list->AddRectFilled(ImVec2(x0, top), ImVec2(x0 + CELL_WIDTH, bottom), shade);
-      int lost = tabulation.get_column_lost(column);
-      if (lost > 0) {
-        float x = x0 + CELL_WIDTH / 2 + 0.5f;
-        float bar_top = bottom - (float)lost / total * (bottom - top);
-        draw_list->AddLine(ImVec2(x, bottom), ImVec2(x, bar_top), COLOR_LOSS, 1.0f);
+    if (mouse_is_ours && mouse.x >= inset_x && mouse.x < inset_x + inset_width &&
+        mouse.y >= top && mouse.y < bottom) {
+      hovered_lane = (int)k;
+    }
+
+    // The heatmap, from the bottom up. The fullest cell isn't marked red, as
+    // it is on the rows: here, red means loss.
+    if (lane.heatmap != NULL) {
+      int largest = lane.heatmap->get_largest_cell();
+      float heat_bottom = bottom - 1;
+      for (int column = 0; column < window.columns; column++) {
+        float x0 = inset_x + column * CELL_WIDTH;
+        for (int row = 0; row < rows; row++) {
+          int count = lane.heatmap->get_count(column, row);
+          if (count == 0) {
+            continue;
+          }
+          ImU32 color = heatmap_cell_color(count, largest, brightness, 0.45, false);
+          float y1 = heat_bottom - row * ROUTE_LANE_CELL_HEIGHT;
+          draw_list->AddRectFilled(ImVec2(x0, y1 - ROUTE_LANE_CELL_HEIGHT),
+                                   ImVec2(x0 + CELL_WIDTH, y1), color);
+        }
       }
     }
+
+    // Loss: a red bar up from the bottom, as tall as the column's loss rate.
+    for (int column = 0; column < window.columns; column++) {
+      int total = tabulation.get_column_total(column);
+      int lost = tabulation.get_column_lost(column);
+      if (total == 0 || lost == 0) {
+        continue;
+      }
+      float x = inset_x + column * CELL_WIDTH + CELL_WIDTH / 2 + 0.5f;
+      float bar_top = bottom - (float)lost / total * (bottom - top);
+      draw_list->AddLine(ImVec2(x, bottom), ImVec2(x, bar_top), COLOR_LOSS, 1.0f);
+    }
+
+    // The host's color, down the lane's left edge.
+    draw_list->AddRectFilled(ImVec2(inset_x - 5, top + 1), ImVec2(inset_x - 2, bottom - 1),
+                             mark);
+
     // A tick per column where a path changed.
     const std::vector<double>& changes = lane.store->get_change_times();
     std::vector<double>::const_iterator it =
@@ -1132,6 +1167,12 @@ void draw_route_lanes(ImDrawList* draw_list, ImVec2 box_min, ImVec2 box_max, flo
       float x = inset_x + column * CELL_WIDTH + CELL_WIDTH / 2 + 0.5f;
       draw_list->AddLine(ImVec2(x, top), ImVec2(x, bottom), mark, 2.0f);
     }
+    // A one-pixel line under each lane, to tell them apart (and the last
+    // from the clock labels). On a whole pixel - AddLine adds the half
+    // itself - or it smears over two rows.
+    float line_y = floorf(bottom);
+    draw_list->AddLine(ImVec2(box_min.x + 1, line_y), ImVec2(box_max.x - 1, line_y),
+                       COLOR_LANE_SEPARATOR);
     if (lane.lit) {
       draw_list->AddRect(ImVec2(box_min.x + 1, top), ImVec2(box_max.x - 1, bottom), COLOR_TEXT);
     }
@@ -1144,4 +1185,20 @@ void draw_route_lanes(ImDrawList* draw_list, ImVec2 box_min, ImVec2 box_max, flo
     draw_list->AddLine(ImVec2(x, box_min.y), ImVec2(x, box_max.y), COLOR_CROSSHAIR);
   }
   draw_list->AddRect(box_min, box_max, COLOR_BORDER);
+
+  if (hovered_lane >= 0) {
+    const RouteLane& lane = lanes[hovered_lane];
+    if (lane.heatmap != NULL) {
+      char low[32];
+      char high[32];
+      format_ms(lane.scale_min, "", low, sizeof(low));
+      format_ms(lane.scale_max, "", high, sizeof(high));
+      ImGui::SetTooltip("%s\n%s scale: %s (the fastest reply) at the bottom,\n"
+                        "%s (99%% of replies are faster) at the top.\n"
+                        "Slower replies are drawn at the top.",
+                        lane.name.c_str(), window.log_scale ? "Log" : "Linear", low, high);
+    } else {
+      ImGui::SetTooltip("%s\nNo replies in this time.", lane.name.c_str());
+    }
+  }
 }

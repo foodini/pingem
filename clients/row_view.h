@@ -101,6 +101,11 @@ private:
 void draw_outlined_text(ImDrawList* draw_list, ImVec2 position, ImU32 color, const char* text,
                         bool align_right, bool align_bottom);
 
+// The heatmap's color for a cell holding `count` replies when the fullest
+// holds `largest`, as RGBA packed the way ImU32 is (see row_view.cpp).
+uint32_t heatmap_cell_color(int count, int largest, double brightness, double floor,
+                            bool mark_fullest);
+
 // The vertical clock-time grid and its labels (at the bottom), for a box
 // whose cells start at inset_x and span inset_width.
 void draw_time_grid(ImDrawList* draw_list, ImVec2 box_min, ImVec2 box_max, float inset_x,
