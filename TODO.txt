@@ -18,3 +18,11 @@
 * Add an estimated per-hop time to each line on the map?
 * All-routes map: fit the whole map on screen in a tiny layout, with the
   area around the mouse magnified (a fisheye), instead of dragging.
+* To discuss: compare hosts against each other. When several hosts spike or
+  lose packets at the same moment, highlight the furthest-out link they all
+  share (the problem is in common: Wi-Fi, router, ISP head end); when only
+  one does, highlight the part of its path that's its own. Works for short
+  events, since it uses the pings. Needs a definition of "an event".
+* To discuss (after per-link time and loss): label who owns each stretch of
+  the map (comcast.net, ntt.net, level3.net... from reverse DNS), so "+90 ms,
+  3% loss here" becomes "it's NTT's Pacific link".

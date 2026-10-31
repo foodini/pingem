@@ -22,7 +22,9 @@
 // of the traffic over it, like subway lines sharing a track.
 //
 // Either way, every router appears once, labeled with its address and,
-// below that, the domain that owns it (from reverse DNS). Hover over a
+// below that, the domain that owns it (from reverse DNS). Every link is
+// labeled with the time it adds, and the loss if any was seen there - as a
+// range ("~30-45ms") while the data is thin (see link_stats.h). Hover over a
 // router, its label, or a link for details: round-trip times, how often it
 // answers, which flows go through it, and the share of each endpoint's
 // traffic. Click one to select the flows that use it - they light up here
@@ -35,6 +37,7 @@
 #ifndef PINGEM_ROUTE_VIEW_H
 #define PINGEM_ROUTE_VIEW_H
 
+#include "link_stats.h"
 #include "public_suffix.h"
 #include "reverse_dns.h"
 #include "route_graph.h"
@@ -58,6 +61,7 @@ struct RouteViewEndpoint {
   ImU32 color;
   FlowMask selection;        // in: the row's selection; out: changed by clicks
   FlowMask hover_flows;      // flows to light up because the mouse is on them elsewhere
+  const FlowStats* pings;    // its pings during the time shown, all flows (NULL if none)
 };
 
 // The larger font for "here", targets' names, and the "*" and "?" of silent
@@ -91,10 +95,11 @@ public:
 private:
   void describe_node(const RouteNode& node, const std::vector<RouteViewEndpoint>& endpoints,
                      ReverseDns* names, const PublicSuffixList& suffixes, std::string* out) const;
-  void describe_edge(const RouteEdge& edge, const std::vector<RouteViewEndpoint>& endpoints,
+  void describe_edge(int edge_index, const std::vector<RouteViewEndpoint>& endpoints,
                      std::string* out) const;
 
   RouteGraph graph;
+  LinkStats link_stats;   // each link's added time and loss, redone every frame
   RouteLayout layout;
   bool have_layout;
   // This machine's address(es) for reaching the endpoints - shown under

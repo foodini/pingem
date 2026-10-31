@@ -30,6 +30,10 @@ static const ImU32 COLOR_TEXT = IM_COL32(255, 255, 255, 255);
 static const ImU32 COLOR_TEXT_DIM = IM_COL32(140, 140, 140, 255);
 static const ImU32 COLOR_OWNER = IM_COL32(160, 200, 255, 255);
 static const ImU32 COLOR_LOSS = IM_COL32(150, 0, 0, 255);
+// The links' labels: time a warm grey, apart from the routers' labels; loss
+// a red bright enough to read as text.
+static const ImU32 COLOR_LINK_TIME = IM_COL32(230, 200, 150, 255);
+static const ImU32 COLOR_LINK_LOSS = IM_COL32(255, 90, 90, 255);
 static const ImU32 COLOR_CROSSHAIR = IM_COL32(255, 0, 0, 255);
 
 ImU32 endpoint_color(int index) {
@@ -251,6 +255,68 @@ static void draw_label(ImDrawList* draw_list, const NodeLabel& label, bool dim, 
   }
 }
 
+// A link's label: the time it adds, and "@" and its loss if any - "38ms@2.1%"
+// (either part may be missing). Laid along the link, on a pill that cuts it,
+// if it fits between the dots; otherwise level, beside it.
+struct LinkLabel {
+  bool shown;
+  bool along;        // laid along the link
+  std::string time;
+  std::string loss;  // with its "@"
+  ImVec2 centre;     // along: the pill's centre...
+  float angle;       // ...and its slope, in radians (always readable: never upside down)
+  float left;        // beside: the text's top left
+  float top;
+  float width;       // the text's size
+  float height;
+};
+
+// The pill behind a label laid along a link, and its padding.
+static const float PILL_PAD = 3.0f;
+
+// A label laid along its link: drawn level, centred where it goes, then
+// turned. ImGui can't draw turned text, but everything it
+// draws is triangles in the draw list's vertex buffer, so the vertices just
+// added can be rotated about the pill's centre.
+static void draw_along(ImDrawList* draw_list, const LinkLabel& label, ImU32 time_color,
+                       ImU32 loss_color, float scale) {
+  ImFont* font = ImGui::GetFont();
+  float size = ImGui::GetFontSize() * scale;
+  float pad = PILL_PAD * scale;
+  ImVec2 centre = label.centre;
+  float left = centre.x - label.width / 2.0f;
+  float top = centre.y - label.height / 2.0f;
+
+  int first_vertex = draw_list->VtxBuffer.Size;
+  draw_list->AddRectFilled(ImVec2(left - pad, top - 1.0f),
+                           ImVec2(left + label.width + pad, top + label.height + 1.0f),
+                           IM_COL32(0, 0, 0, 220), label.height / 2.0f + 1.0f);
+  // Drawn without the clip rect: the text is clipped (culled by the glyph)
+  // where it sits BEFORE turning, which near the map's edge isn't where it
+  // ends up.
+  ImVec4 no_clip(-1e9f, -1e9f, 1e9f, 1e9f);
+  float x = left;
+  if (!label.time.empty()) {
+    draw_list->AddText(font, size, ImVec2(x, top), time_color, label.time.c_str(), NULL, 0.0f,
+                       &no_clip);
+    x += font->CalcTextSizeA(size, 1e9f, 0.0f, label.time.c_str()).x;
+  }
+  if (!label.loss.empty()) {
+    draw_list->AddText(font, size, ImVec2(x, top), loss_color, label.loss.c_str(), NULL, 0.0f,
+                       &no_clip);
+  }
+
+  float c = cosf(label.angle);
+  float s = sinf(label.angle);
+  for (int i = first_vertex; i < draw_list->VtxBuffer.Size; i++) {
+    ImDrawVert& vertex = draw_list->VtxBuffer[i];
+    float px = vertex.pos.x - centre.x;
+    float py = vertex.pos.y - centre.y;
+    vertex.pos.x = centre.x + px * c - py * s;
+    vertex.pos.y = centre.y + px * s + py * c;
+  }
+}
+
 // "x5", or "x4-5" when different flows' runs differ.
 static std::string run_length_text(const RouteNode& node) {
   char text[32];
@@ -442,11 +508,59 @@ void RouteView::describe_node(const RouteNode& node,
   *out = text;
 }
 
-void RouteView::describe_edge(const RouteEdge& edge,
-                              const std::vector<RouteViewEndpoint>& endpoints,
+// A floor or a loss rate for a tooltip: "12.1ms", or "~10.3-12.1ms".
+static std::string describe_floor(const Estimate& floor) {
+  char low[32];
+  char high[32];
+  format_ms(floor.low, "", low, sizeof(low));
+  format_ms(floor.high, "", high, sizeof(high));
+  if (floor.high - floor.low <= std::max(0.0005, 0.1 * floor.point)) {
+    format_ms(floor.point, "", high, sizeof(high));
+    return high;
+  }
+  return std::string("~") + low + "-" + high;
+}
+
+static std::string describe_rate(const Estimate& loss) {
+  char text[64];
+  snprintf(text, sizeof(text), "%.1f%% (95%%: %.1f-%.1f%%)", 100.0 * loss.point, 100.0 * loss.low,
+           100.0 * loss.high);
+  return text;
+}
+
+void RouteView::describe_edge(int edge_index, const std::vector<RouteViewEndpoint>& endpoints,
                               std::string* out) const {
+  const RouteEdge& edge = graph.get_edges()[edge_index];
   char line[256];
   std::string text;
+
+  // What it adds, and what that rests on: each end judged by the best seen
+  // at it or beyond it.
+  const LinkFigures& link = link_stats.get_link(edge_index);
+  const NodeFigures& near = link_stats.get_node(edge.from);
+  const NodeFigures& far = link_stats.get_node(edge.to);
+  if (link.time.known) {
+    snprintf(line, sizeof(line), "adds %s: fastest reply %s before it (%.0f replies),\n",
+             describe_link_time(link.time).c_str(), describe_floor(near.floor).c_str(),
+             std::min(near.floor.samples, 1e6));
+    text += line;
+    snprintf(line, sizeof(line), "  %s after it (%.0f replies)\n",
+             describe_floor(far.floor).c_str(), std::min(far.floor.samples, 1e6));
+    text += line;
+  } else {
+    text += "time added: no replies on both sides yet\n";
+  }
+  if (link.loss.known) {
+    std::string loss = describe_link_loss(link.loss);
+    snprintf(line, sizeof(line), "%s: lost %s before it,\n",
+             loss.empty() ? "no loss added" : ("adds " + loss + " loss").c_str(),
+             describe_rate(near.loss).c_str());
+    text += line;
+    snprintf(line, sizeof(line), "  %s after it\n", describe_rate(far.loss).c_str());
+    text += line;
+  }
+  text += "(each end judged by the best seen at it or beyond it)\n";
+
   bool selected = true;
   for (size_t e = 0; e < endpoints.size(); e++) {
     FlowMask flows = edge.flows[e];
@@ -503,6 +617,11 @@ void RouteView::draw(ImDrawList* draw_list, ImVec2 area_min, ImVec2 area_max,
     sources.push_back(source);
   }
   graph.build_if_needed(sources, window_start, window_end);
+  std::vector<const FlowStats*> pings;
+  for (int e = 0; e < endpoint_count; e++) {
+    pings.push_back(endpoints[e].pings);
+  }
+  link_stats.compute(graph, pings);
   for (int e = 0; e < endpoint_count; e++) {
     endpoints[e].flow_count = graph.get_flow_count(e);
   }
@@ -816,6 +935,156 @@ void RouteView::draw(ImDrawList* draw_list, ImVec2 area_min, ImVec2 area_max,
     }
   }
 
+  // Each link's figures, "38ms@2.1%": laid along the link on a pill, at its
+  // middle, if there's room between the dots; otherwise level, beside it -
+  // on whichever side, and wherever along its middle third, it covers the
+  // least of the routers' labels and dots and the other links' labels.
+  std::vector<LinkLabel> link_labels(edges.size());
+  {
+    ImFont* font = ImGui::GetFont();
+    float font_size = ImGui::GetFontSize() * z;
+    float text_line = ImGui::GetTextLineHeight() * z;
+    float pad = PILL_PAD * z;
+    std::vector<ImVec2> taken_min;
+    std::vector<ImVec2> taken_max;
+    for (size_t i = 0; i < nodes.size(); i++) {
+      const NodeLabel& label = labels[i];
+      if (!placed[i] || !label.shown) {
+        continue;
+      }
+      float w = label.size.x * z;
+      float left = label.flip ? label.at.x - w : label.at.x;
+      taken_min.push_back(ImVec2(left, label.at.y));
+      taken_max.push_back(ImVec2(left + w, label.at.y + label.size.y * z));
+    }
+
+    // First, the text, and the ones that fit along their links.
+    for (size_t k = 0; k < edges.size(); k++) {
+      const RouteEdge& edge = edges[k];
+      LinkLabel& label = link_labels[k];
+      label.shown = false;
+      label.along = false;
+      if (!placed[edge.from] || !placed[edge.to]) {
+        continue;
+      }
+      const LinkFigures& link = link_stats.get_link((int)k);
+      label.time = describe_link_time(link.time);
+      label.loss = describe_link_loss(link.loss);
+      if (!label.loss.empty()) {
+        label.loss = "@" + label.loss;
+      }
+      if (label.time.empty() && label.loss.empty()) {
+        continue;
+      }
+      std::string whole = label.time + label.loss;
+      label.width = font->CalcTextSizeA(font_size, 1e9f, 0.0f, whole.c_str()).x;
+      label.height = text_line;
+      ImVec2 a = at[edge.from];
+      ImVec2 b = at[edge.to];
+      float dx = b.x - a.x;
+      float dy = b.y - a.y;
+      float length = sqrtf(dx * dx + dy * dy);
+      if (length < 1.0f) {
+        continue;
+      }
+      label.shown = true;
+      float room = length - 2.0f * (radius + 3.0f * z);
+      if (label.width + 2.0f * pad > room) {
+        continue;   // placed beside it, below
+      }
+      label.along = true;
+      label.centre = ImVec2((a.x + b.x) / 2.0f, (a.y + b.y) / 2.0f);
+      // Readable: left to right; a steep link reads bottom to top.
+      if (fabsf(dx) < 0.05f * length) {
+        label.angle = -(float)M_PI / 2.0f;
+      } else {
+        label.angle = atan2f(dx < 0.0f ? -dy : dy, dx < 0.0f ? -dx : dx);
+      }
+      float half_w = label.width / 2.0f + pad;
+      float half_h = label.height / 2.0f + 1.0f;
+      float c = fabsf(cosf(label.angle));
+      float sn = fabsf(sinf(label.angle));
+      float reach_x = half_w * c + half_h * sn;
+      float reach_y = half_w * sn + half_h * c;
+      taken_min.push_back(ImVec2(label.centre.x - reach_x, label.centre.y - reach_y));
+      taken_max.push_back(ImVec2(label.centre.x + reach_x, label.centre.y + reach_y));
+    }
+
+    // Then the ones that didn't fit, beside their links.
+    for (size_t k = 0; k < edges.size(); k++) {
+      const RouteEdge& edge = edges[k];
+      LinkLabel& label = link_labels[k];
+      if (!label.shown || label.along) {
+        continue;
+      }
+      ImVec2 a = at[edge.from];
+      ImVec2 b = at[edge.to];
+      float dx = b.x - a.x;
+      float dy = b.y - a.y;
+      float length = sqrtf(dx * dx + dy * dy);
+      float half_width;
+      if (several) {
+        half_width = edge_pixels[k] * z / 2.0f;
+      } else {
+        int flow_count = endpoints[0].flow_count > 0 ? endpoints[0].flow_count : 1;
+        half_width = (1.0f + 9.0f * count_flows(edge.flows[0]) / flow_count) / 2.0f;
+      }
+      float away = half_width + 3.0f * z;
+
+      // Candidates: either side, at a third, half, or two thirds of the way.
+      // Preferred: the middle, on the right (or below, for a level link).
+      float best_cost = 1e30f;
+      for (int side = 0; side < 2; side++) {
+        float normal_x = -dy / length;
+        float normal_y = dx / length;
+        bool right = normal_x > 0.01f || (normal_x >= -0.01f && normal_y > 0.0f);
+        if (right != (side == 0)) {
+          normal_x = -normal_x;
+          normal_y = -normal_y;
+        }
+        static const float ALONG[3] = {0.5f, 0.35f, 0.65f};
+        for (int t = 0; t < 3; t++) {
+          ImVec2 anchor(a.x + dx * ALONG[t] + normal_x * away, a.y + dy * ALONG[t] + normal_y * away);
+          float left = anchor.x - label.width / 2.0f;
+          if (normal_x > 0.35f) {
+            left = anchor.x;
+          } else if (normal_x < -0.35f) {
+            left = anchor.x - label.width;
+          }
+          float top = anchor.y - label.height / 2.0f;
+          if (normal_y > 0.35f) {
+            top = anchor.y;
+          } else if (normal_y < -0.35f) {
+            top = anchor.y - label.height;
+          }
+          float right_edge = left + label.width;
+          float bottom = top + label.height;
+          float cost = side * 2.0f + t * 1.0f;
+          for (size_t j = 0; j < taken_min.size(); j++) {
+            float overlap_x = std::min(right_edge, taken_max[j].x) - std::max(left, taken_min[j].x);
+            float overlap_y = std::min(bottom, taken_max[j].y) - std::max(top, taken_min[j].y);
+            if (overlap_x > 0 && overlap_y > 0) {
+              cost += overlap_x * overlap_y;
+            }
+          }
+          for (size_t j = 0; j < nodes.size(); j++) {
+            if (placed[j] && at[j].x > left - radius && at[j].x < right_edge + radius &&
+                at[j].y > top - radius && at[j].y < bottom + radius) {
+              cost += 200.0f;
+            }
+          }
+          if (cost < best_cost) {
+            best_cost = cost;
+            label.left = left;
+            label.top = top;
+          }
+        }
+      }
+      taken_min.push_back(ImVec2(label.left, label.top));
+      taken_max.push_back(ImVec2(label.left + label.width, label.top + label.height));
+    }
+  }
+
   // What the mouse is over: a node (its dot or its label) first, then a
   // link. With several endpoints, dragging empty space moves the map and
   // the wheel zooms it.
@@ -1004,6 +1273,43 @@ void RouteView::draw(ImDrawList* draw_list, ImVec2 area_min, ImVec2 area_max,
     }
   }
 
+  // The links' labels (placed above), under the nodes' labels, which
+  // matter more.
+  for (size_t k = 0; k < link_labels.size(); k++) {
+    const LinkLabel& label = link_labels[k];
+    if (!label.shown) {
+      continue;
+    }
+    const RouteEdge& edge = edges[k];
+    bool dim = false;
+    if (anything_lit) {
+      dim = true;
+      for (int e = 0; e < endpoint_count; e++) {
+        if ((edge.flows[e] & lit[e]) != 0) {
+          dim = false;
+        }
+      }
+    }
+    ImU32 time_color = dim ? COLOR_TEXT_DIM : COLOR_LINK_TIME;
+    ImU32 loss_color = dim ? COLOR_TEXT_DIM : COLOR_LINK_LOSS;
+    if (label.along) {
+      draw_along(draw_list, label, time_color, loss_color, z);
+      continue;
+    }
+    draw_list->AddRectFilled(ImVec2(label.left - 2, label.top - 1),
+                             ImVec2(label.left + label.width + 2, label.top + label.height + 1),
+                             IM_COL32(0, 0, 0, 170), 3.0f);
+    float x = label.left;
+    if (!label.time.empty()) {
+      scaled_text(draw_list, ImVec2(x, label.top), time_color, label.time.c_str(), z, false);
+      x += ImGui::GetFont()->CalcTextSizeA(ImGui::GetFontSize() * z, 1e9f, 0.0f,
+                                           label.time.c_str()).x;
+    }
+    if (!label.loss.empty()) {
+      scaled_text(draw_list, ImVec2(x, label.top), loss_color, label.loss.c_str(), z, false);
+    }
+  }
+
   // Nodes and their labels.
   for (size_t i = 0; i < nodes.size(); i++) {
     if (!placed[i]) {
@@ -1080,7 +1386,7 @@ void RouteView::draw(ImDrawList* draw_list, ImVec2 area_min, ImVec2 area_max,
     ImGui::SetTooltip("%s", text.c_str());
   } else if (hovered_edge >= 0) {
     std::string text;
-    describe_edge(edges[hovered_edge], endpoints, &text);
+    describe_edge(hovered_edge, endpoints, &text);
     ImGui::SetTooltip("%s", text.c_str());
   }
 }

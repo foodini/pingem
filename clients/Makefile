@@ -8,7 +8,7 @@ WARNINGS = -Wall -Wextra
 IMGUI    = ../third_party/imgui
 
 OUR_OBJECTS   = main.o daemon_link.o target_history.o timeline.o tabulation.o row_view.o \
-                route_store.o route_graph.o route_view.o reverse_dns.o public_suffix.o \
+                route_store.o route_graph.o link_stats.o route_view.o reverse_dns.o public_suffix.o \
                 protocol.o
 IMGUI_OBJECTS = imgui.o imgui_draw.o imgui_tables.o imgui_widgets.o \
                 imgui_impl_sdl2.o imgui_impl_opengl3.o

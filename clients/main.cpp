@@ -831,6 +831,10 @@ int main(int argc, char* argv[]) {
         endpoint.color = endpoint_color(target.id);
         endpoint.selection = target.row->get_selection();
         endpoint.hover_flows = target.id == hovered_flow_target ? hovered_flows : 0;
+        // Its pings, for the links' figures. Tabulated as its row or lane is
+        // (so this doesn't make the tabulation rebuild every frame).
+        target.row->tabulate(*target.history, view, !routes_several && (by_flow || routes_single));
+        endpoint.pings = &target.row->get_tabulation().get_stats(-1);
         endpoints.push_back(endpoint);
         endpoint_targets.push_back(&target);
       }

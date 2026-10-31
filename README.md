@@ -330,6 +330,28 @@ disagree, the route changed during the time shown. With 8 flows the
 estimate moves in steps of 1/8, and only 8 of the router's hash buckets are
 ever sampled, so treat it as rough; more flows (`--flows 16`) sharpen it.
 
+**Time and loss on each link.** Every link is labeled with the time it
+adds, and with the loss it adds if any was seen there: `38ms`, or
+`38ms@2.1%` with loss (in red). The label lies along the link, on a dark
+pill, when it fits between the dots; otherwise it sits level, beside it.
+Each end of a link is judged by the best figures seen at it *or anywhere
+beyond it*, up to the target (whose figures come from the pings): a router
+that's slow to answer probes, or ignores some, can't make the hops after it
+look bad, so its own quirks drop out, while a long cable, a queue or a lossy
+link shows up, because every hop beyond it pays for it too. The time is the
+difference between the fastest replies at the two ends; the loss, the far
+end's loss net of the near end's.
+
+While the data is thin, the figures are ranges - `~30-45ms`, `@~1.0-6.3%` -
+and they narrow to single numbers as replies come in. (A floor's range runs
+from "fastest minus the gap to the second fastest" up to the fastest; a loss
+rate's is its 95% confidence interval.) Zoomed in to a short time, expect
+ranges; zoom out for more data. Hover over a link for what its figures rest
+on. Pings a router refused aren't counted as loss on any link: the refusal
+is shown on the router. One caveat: a reply's trip back can take a different
+path than the probe's trip out, so time a link "adds" may really be on the
+way back.
+
 A few more things worth knowing:
 * A router's own round trip time is often slower and jumpier than the
   traffic passing through it: answering a probe is a chore for its CPU, done
